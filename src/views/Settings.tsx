@@ -57,6 +57,7 @@ import { cn } from "../utils";
 import { useApp } from "../context/AppContext";
 import { useThemeContext } from "../context/ThemeContext";
 import { AgentIcon } from "../components/AgentIcon";
+import { AiSettingsSection } from "../components/ai/AiSettingsSection";
 import * as api from "../lib/tauri";
 import { applyTextSize } from "../lib/textScale";
 import { getErrorMessage } from "../lib/error";
@@ -1541,6 +1542,9 @@ export function Settings() {
             </div>
           </div>
         </section>
+
+        {/* AI settings stay self-contained so credentials never enter the parent view state. */}
+        <AiSettingsSection />
 
         {/* Proxy config */}
         <section>

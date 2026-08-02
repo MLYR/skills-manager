@@ -1,5 +1,5 @@
-use anyhow::Result;
-use rusqlite::{params, Connection};
+use anyhow::{anyhow, Context, Result};
+use rusqlite::{params, Connection, Transaction, TransactionBehavior};
 use serde::Serialize;
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -131,6 +131,50 @@ impl SkillStore {
             conn: Mutex::new(conn),
             secret_key,
         })
+    }
+
+    /// AI repositories receive only a scoped callback, not the connection
+    /// itself, so they reuse the migrated database without creating an
+    /// unmanaged connection or leaking SQLite ownership outside SkillStore.
+    pub(crate) fn with_ai_connection<T>(
+        &self,
+        operation: impl FnOnce(&Connection) -> Result<T>,
+    ) -> Result<T> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| anyhow!("AI database mutex is poisoned"))?;
+        operation(&conn).context("AI database operation failed")
+    }
+
+    /// Multi-table AI state changes use one immediate transaction because a
+    /// partial batch/job/result write would violate the persisted queue state.
+    pub(crate) fn with_ai_transaction<T>(
+        &self,
+        operation: impl FnOnce(&Transaction<'_>) -> Result<T>,
+    ) -> Result<T> {
+        let mut conn = self
+            .conn
+            .lock()
+            .map_err(|_| anyhow!("AI database mutex is poisoned"))?;
+        let transaction = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .context("failed to start AI database transaction")?;
+
+        match operation(&transaction) {
+            Ok(value) => {
+                transaction
+                    .commit()
+                    .context("failed to commit AI database transaction")?;
+                Ok(value)
+            }
+            Err(operation_error) => match transaction.rollback() {
+                Ok(()) => Err(operation_error).context("AI database transaction rolled back"),
+                Err(rollback_error) => Err(anyhow!(
+                    "AI database operation failed: {operation_error}; rollback failed: {rollback_error}"
+                )),
+            },
+        }
     }
 
     // ── Skills CRUD ──
@@ -1379,6 +1423,30 @@ impl SkillStore {
                 .collect::<rusqlite::Result<Vec<_>>>()?
         };
         Ok(rows)
+    }
+}
+
+#[cfg(test)]
+mod ai_access_tests {
+    use super::*;
+    use std::panic::{catch_unwind, AssertUnwindSafe};
+    use tempfile::tempdir;
+
+    #[test]
+    fn ai_access_reports_poisoned_lock_instead_of_panicking() {
+        let tmp = tempdir().unwrap();
+        let store = SkillStore::new(&tmp.path().join("test.db")).unwrap();
+
+        // Simulate a prior database worker panic while it owned the mutex; AI
+        // access must return an explicit storage error on the next operation.
+        let panic_result = catch_unwind(AssertUnwindSafe(|| {
+            let _guard = store.conn.lock().unwrap();
+            panic!("deliberately poison AI database lock");
+        }));
+        assert!(panic_result.is_err());
+
+        let error = store.with_ai_connection(|_| Ok(())).unwrap_err();
+        assert!(error.to_string().contains("mutex is poisoned"));
     }
 }
 

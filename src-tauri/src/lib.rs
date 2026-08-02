@@ -861,6 +861,19 @@ pub fn run() {
                 }
             });
 
+            // Retention cleanup is privacy-sensitive but not startup-critical;
+            // run it after logger setup without delaying window creation.
+            let store_for_ai_log_cleanup = store_for_setup.clone();
+            tauri::async_runtime::spawn_blocking(move || {
+                match core::ai::logs::cleanup_expired_logs_on_startup(&store_for_ai_log_cleanup) {
+                    Ok(deleted) if deleted > 0 => {
+                        log::info!("startup: removed {deleted} expired AI analysis log(s)")
+                    }
+                    Ok(_) => {}
+                    Err(error) => log::warn!("startup: AI log cleanup skipped: {error}"),
+                }
+            });
+
             let step = Instant::now();
             if is_tray_icon_enabled(&store_for_setup) {
                 ensure_tray_icon(app.handle())?;
@@ -943,6 +956,14 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            // AI configuration
+            commands::ai::get_ai_provider_presets,
+            commands::ai::get_ai_config,
+            commands::ai::save_ai_config,
+            commands::ai::get_ai_api_key_status,
+            commands::ai::set_ai_api_key,
+            commands::ai::delete_ai_api_key,
+            commands::ai::test_ai_connection,
             // Tools
             commands::tools::get_tool_status,
             commands::tools::set_tool_enabled,

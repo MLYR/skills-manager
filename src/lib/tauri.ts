@@ -183,6 +183,55 @@ export interface ProjectSkillDocument {
   content: string;
 }
 
+// Keep the settings command boundary aligned with Rust's snake_case DTOs so
+// credentials never need a frontend-side transformation or cached alias.
+export type AiProvider = "openai" | "deepseek" | "openrouter" | "ollama" | "custom";
+export type AiOutputLanguage = "auto" | "zh" | "zh-TW" | "en";
+
+export interface AiConfigInput {
+  provider: AiProvider;
+  base_url: string;
+  model: string;
+  output_language: AiOutputLanguage;
+  timeout_seconds: number;
+  concurrency: number;
+  log_retention_days: number;
+  input_price_micros_per_million: number | null;
+  output_price_micros_per_million: number | null;
+}
+
+export interface AiConfigDto extends AiConfigInput {
+  has_api_key: boolean;
+  is_configured: boolean;
+}
+
+export interface AiApiKeyStatusDto {
+  has_api_key: boolean;
+}
+
+export interface AiProviderPresetDto {
+  id: AiProvider;
+  display_name: string;
+  base_url: string;
+  default_model: string | null;
+  api_key_required: boolean;
+}
+
+export interface AiConnectionTestInput {
+  config: AiConfigInput;
+  confirm_billable_request: boolean;
+}
+
+export interface AiConnectionTestDto {
+  success: boolean;
+  provider: string;
+  model: string;
+  message: string;
+  http_status: number | null;
+  latency_ms: number;
+  billable_request_sent: boolean;
+}
+
 // ── Tools ──
 
 export const getToolStatus = () => invoke<ToolInfo[]>("get_tool_status");
@@ -417,6 +466,29 @@ export const getCentralRepoWarnings = () =>
 
 export const setCentralRepoPath = (path?: string | null) =>
   invoke<string>("set_central_repo_path", { path: path ?? null });
+
+// AI commands accept complete typed payloads; keeping wrappers thin prevents
+// accidental logging or partial serialization of sensitive request data.
+export const getAiProviderPresets = () =>
+  invoke<AiProviderPresetDto[]>("get_ai_provider_presets");
+
+export const getAiConfig = () =>
+  invoke<AiConfigDto>("get_ai_config");
+
+export const saveAiConfig = (input: AiConfigInput) =>
+  invoke<AiConfigDto>("save_ai_config", { input });
+
+export const getAiApiKeyStatus = () =>
+  invoke<AiApiKeyStatusDto>("get_ai_api_key_status");
+
+export const setAiApiKey = (input: { api_key: string }) =>
+  invoke<AiApiKeyStatusDto>("set_ai_api_key", { input });
+
+export const deleteAiApiKey = () =>
+  invoke<AiApiKeyStatusDto>("delete_ai_api_key");
+
+export const testAiConnection = (input: AiConnectionTestInput) =>
+  invoke<AiConnectionTestDto>("test_ai_connection", { input });
 
 export const appExit = () => invoke<void>("app_exit");
 

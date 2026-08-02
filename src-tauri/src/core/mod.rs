@@ -1,4 +1,7 @@
 pub mod app_state;
+// AI data types and repository are registered before service/command wiring so
+// every later phase shares the frozen v8 storage contract.
+pub mod ai;
 pub mod audit_log;
 pub mod auto_backup;
 pub mod central_repo;
