@@ -113,6 +113,8 @@
 | 2026-08-03 | 新增每阶段验收后先提交再进下一阶段规则 | 用户要求“每个阶段验收完成后都提交代码再进行下一阶段”；已写入`AGENTS.md`与`02-development-process.md`，后续阶段按此执行 |
 | 2026-08-03 | 阶段4实现完成并自审验收 | 批量控制（暂停/继续/取消批次、取消任务、单项重试）、分页列表、队列统计与AI管理页落地；Rust全量470 passed（含网络测试，沙箱已允许回环绑定）、eslint/tsc/i18n通过；阶段4计入15%，累计85% |
 | 2026-08-03 | 阶段5实现完成并自审验收 | 日志列表/详情/一键清空、30天自动清理、脱敏与安全扫描通过；Rust全量470 passed、eslint/tsc/i18n同构通过；阶段5计入15%，累计100% |
+| 2026-08-03 | 缺陷修复：真实响应无法通过schema v1校验 | 根因：`service.rs`把整个OpenAI-compatible响应体（`choices[0].message.content`+`usage`包装）直接交给schema校验，必然失败。修复：先提取`choices[0].message.content`（兼容直接返回schema对象的本地服务），再走既有校验链；新增端到端假服务测试复现并验证成功闭环。Rust全量473 passed |
+| 2026-08-03 | 缺陷修复：AI解读管理页无法打开 | 根因：`get_ai_analysis_queue_stats`全量扫描中心/全局/项目目标，任一目标查询失败会中断整个命令；前端又要求统计加载完成才渲染页面，导致长时间空白/打不开。修复：统计改为尽力而为（单目标失败降级为未解析、列表失败仍返回批次/任务计数），前端页面立即渲染，统计异步填充。tsc/lint通过 |
 
 ## 12. 阶段3执行记录（已完成）
 
@@ -412,3 +414,49 @@
 - 按多子代理要求派出阶段2实现Agent三次（`phase2_backend_service`、`_b`、`_c`）并用探针验证通道：前两次因“stream disconnected before completion: Encrypted function output content could not be decrypted or decoded”中断且零文件改动；第三次与探针Agent均正常完成但明确回复“未收到具体任务内容”；随后两次`followup_task`（含最小消息“请只回复OK”）同样未送达。
 - 已排除任务描述因素：消息从约3000词精简至约500词、去掉模型/推理覆盖、改用不同Agent与不同通道均复现；spawn初始消息与followup消息走同一加密通道，当前会话内该通道疑似整体失效。
 - 工作树在全部尝试前后无任何子代理产生的改动，仅主会话登记的进度文档更新；阶段2其余实现未开始，等待用户处置。
+
+## 15. 用户反馈缺陷修复（2026-08-03，已完成）
+
+范围：阶段2解析结果状态展示、阶段4批次/任务管理页交互；不改变冻结DTO、任务状态机或收费预览契约。
+
+已登记问题：
+
+- 解析成功后仍显示历史失败任务的红色错误提示。
+- AI 解读管理页统计扫描过慢时长期显示加载中，批次、任务和日志无法形成联动浏览。
+- 混合成功/失败批次只显示“已完成”，失败数量不清晰，且缺少只重试失败目标的入口。
+
+处理决策：成功写入时清除Job错误字段；详情/摘要仅在当前状态为`failed`时返回错误；管理页统计改为非阻塞提示，批次与任务并排展示，任务选中后加载对应请求/响应日志；“一键解析失败项”仍先生成预览，且按当前摘要状态过滤已成功目标。
+
+验收证据：`cargo test --manifest-path src-tauri/Cargo.toml` 473 passed、`cargo check`通过、`npx tsc -b --pretty false`通过、`npm run lint`通过、三语`ai`键集合一致、`git diff --check`通过。未启动/构建前端；启动、构建、打包命令仍分别为`npm run dev`、`npm run build`、`npm run tauri:build`。
+
+补充交付：技能库与全局 Agents 工作区的网格/列表均展示 AI 解析状态；Agents 本地 Skill 详情默认打开 AI 解读，并使用当前 Agent 的规范`agent_key`查询，避免展示到错误目标或回退到“本地”标签。
+
+一致性修复：对于状态为`in_sync`且已关联中心库的 Agents Skill，详情、状态徽标和重新解析统一复用同一条`managed + skill_id`解读；本地变更、分叉或仅本地的 Skill 继续使用独立`global_local`记录，避免将中心内容的解读错误展示为本地内容。AI任务处于活动状态时，详情页每2秒回读持久化状态，完成后自动回显结构化结果。
+
+## 16. Agents 首屏性能优化（已完成，2026-08-03）
+
+负责人：主会话（用户授权直接实现与自审）
+
+问题证据：Agents 进入详情页时，`get_global_local_skills` 会同步扫描真实 Agent 目录；每个 Skill 都会解析主文档、枚举文件、递归计算内容哈希/修改时间，并重新查询中心库关系。页面没有跨路由缓存；总览页还会为每个已安装 Agent 并行执行完整扫描。当前 Codex Skills 目录约54个文件、508KB，数据量不足以解释长时间白屏，重复扫描和阻塞等待是主要风险。
+
+冻结的最小优化方案：
+
+- 新增轻量 Agent Skill 头信息扫描Command，首屏只读取名称、描述、路径和直接文件列表，不计算递归内容哈希。
+- 首屏列表返回后，后台继续执行现有完整扫描，补齐同步状态、中心关联、标签和哈希；后台失败不得抹掉已经展示的列表。
+- 前端缓存已完成扫描结果并复用进行中的同Agent请求；手动刷新及导入、删除、拉取、同步等已知文件变更操作均强制重新校验。
+- Agents 总览数量统计复用轻量扫描，不再为每个 Agent 启动完整哈希扫描。
+
+接口/文件范围：`src-tauri/src/core/project_scanner.rs`、`src-tauri/src/commands/agent_workspace.rs`、`src-tauri/src/lib.rs`、`src/lib/tauri.ts`、`src/views/WorkspaceView.tsx`；不改变AI目标身份、DTO状态机、收费预览或原始Skill文件。
+
+验收结果：
+
+- 新增轻量头信息扫描Command；首屏先返回名称、描述、路径和直接文件列表，完整哈希扫描改为后台补全。
+- Agents 总览数量统计改用轻量扫描；前端按Agent缓存完整结果，并复用同Agent进行中的轻量/完整请求。
+- 后台补全失败时保留首屏列表，不把已展示内容清空；完整扫描完成后才请求AI摘要，避免用不完整身份查询解读。
+- `rtk cargo test --manifest-path src-tauri/Cargo.toml core::project_scanner -- --nocapture`：5 passed。
+- `rtk cargo test --manifest-path src-tauri/Cargo.toml`：474 passed（4 suites，44.89秒）。
+- `rtk cargo check --manifest-path src-tauri/Cargo.toml`、新增扫描器文件的Rust格式检查、`npx tsc -b --pretty false`、`npm run lint`、`git diff --check`均通过；全仓`cargo fmt --check`仍会报告工作树中既有的无关格式差异，本轮未格式化或覆盖这些文件。
+
+遗留风险：轻量扫描和完整扫描仍会读取本地文件；缓存为进程内缓存，手动刷新会强制重新校验。由于前端未启动/打包，本轮未做真实窗口计时；启动、构建、打包命令仍分别为`npm run dev`、`npm run build`、`npm run tauri:build`。
+
+验收结论：主会话自审通过，未改变AI目标身份、收费预览、任务状态机或原始Skill文件。
