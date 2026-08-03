@@ -9,6 +9,7 @@
     "lobsterAgents": "龍蝦 Agent",
     "installSkills": "安裝 Skills",
     "backup": "備份",
+    "aiManager": "AI 解讀管理",
     "presets": "Preset",
     "newPreset": "新增 Preset",
     "projects": "專案工作區",
@@ -273,6 +274,52 @@
     },
     "list": {
       "stale": "待更新"
+    },
+    "manager": {
+      "title": "AI 解讀管理",
+      "subtitle": "批次解析、暫停/繼續/取消與單項重試；進度來自後端持久狀態。",
+      "newBatch": "新增批次解析",
+      "noSkills": "技能庫為空，沒有可解析的目標。",
+      "batchEnqueued": "批次解析任務已建立",
+      "retryEnqueued": "重試任務已建立",
+      "noBatches": "尚無批次",
+      "noJobs": "尚無任務",
+      "statTotal": "目標總數",
+      "statUnparsed": "未解析",
+      "statSucceeded": "已解析",
+      "statStale": "待更新",
+      "statFailed": "失敗",
+      "statNoDocument": "無文件",
+      "statUnreadable": "不可讀",
+      "batches": "批次",
+      "jobs": "任務",
+      "attempts": "已完成",
+      "pause": "暫停",
+      "resume": "繼續",
+      "cancel": "取消批次",
+      "cancelJob": "取消任務",
+      "retry": "重試",
+      "paused": "已暫停",
+      "resumed": "已繼續",
+      "cancelled": "已取消",
+      "jobCancelled": "任務已取消"
+    },
+    "batchStatus": {
+      "queued": "排隊中",
+      "running": "執行中",
+      "paused": "已暫停",
+      "cancelling": "取消中",
+      "completed": "已完成",
+      "cancelled": "已取消"
+    },
+    "jobStatus": {
+      "queued": "排隊中",
+      "running": "執行中",
+      "retry_wait": "等待重試",
+      "interrupted": "已中斷",
+      "succeeded": "成功",
+      "failed": "失敗",
+      "cancelled": "已取消"
     }
   },
   "mySkills": {

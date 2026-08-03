@@ -595,7 +595,7 @@ fn linked_agent_name(record: &ProjectRecord) -> String {
 /// groups adapters by their project-relative skills directory, keeping the
 /// first adapter key and joining display names. Kept local so the collector
 /// can re-run the exact authoritative scan without exposing a private command.
-fn agent_scan_configs(store: &SkillStore) -> Vec<AgentSkillConfig> {
+pub(crate) fn agent_scan_configs(store: &SkillStore) -> Vec<AgentSkillConfig> {
     let mut grouped: Vec<(String, Vec<(String, String)>)> = Vec::new();
     for adapter in tool_adapters::all_tool_adapters(store) {
         let project_dir = adapter.project_relative_skills_dir().to_string();

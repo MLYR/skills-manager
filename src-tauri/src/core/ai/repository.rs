@@ -76,6 +76,13 @@ pub struct RecoverySummary {
     pub cancelled_batches: i64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CancelJobOutcome {
+    Cancelled,
+    RunningCancelled,
+    InvalidState,
+}
+
 /// Raw per-target state used by detail/summary status computation.
 #[derive(Debug, Default)]
 pub struct TargetState {
@@ -607,6 +614,320 @@ impl<'a> AiRepository<'a> {
                 .map_err(anyhow::Error::from)
         })
     }
+
+    pub fn get_job(&self, job_id: &str) -> Result<Option<AiJobRecord>> {
+        self.store
+            .with_ai_connection(|connection| load_job(connection, job_id))
+    }
+
+    pub fn list_batches(
+        &self,
+        status: Option<&str>,
+        cursor: Option<&str>,
+        limit: u16,
+    ) -> Result<(Vec<AiBatchRecord>, Option<String>)> {
+        self.store.with_ai_connection(|connection| {
+            let (cursor_created, cursor_id) = parse_cursor(cursor)?;
+            let page_size = i64::from(limit) + 1;
+            let mut sql = String::from(
+                "SELECT id,status,provider,base_url,model,output_language,prompt_version,schema_version,
+                    timeout_seconds,input_price_micros_per_million,output_price_micros_per_million,
+                    estimated_input_tokens,estimated_output_tokens,estimated_cost_micros,
+                    estimated_max_retry_cost_micros,total_targets,valid_documents,missing_documents,
+                    unreadable_documents,skipped_targets,pause_requested,cancel_requested,
+                    confirmed_at,created_at,updated_at,finished_at
+                 FROM ai_analysis_batches WHERE 1=1",
+            );
+            let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+            if let Some(status) = status {
+                sql.push_str(" AND status = ?");
+                params.push(Box::new(status.to_string()));
+            }
+            if let (Some(created_at), Some(id)) = (cursor_created, cursor_id) {
+                sql.push_str(" AND (created_at < ? OR (created_at = ? AND id < ?))");
+                params.push(Box::new(created_at));
+                params.push(Box::new(created_at));
+                params.push(Box::new(id));
+            }
+            sql.push_str(" ORDER BY created_at DESC, id DESC LIMIT ?");
+            params.push(Box::new(page_size));
+
+            let mut statement = connection.prepare(&sql)?;
+            let rows = statement.query_map(
+                rusqlite::params_from_iter(params.iter().map(|value| value.as_ref())),
+                map_batch_row,
+            )?;
+            let mut batches = Vec::new();
+            for row in rows {
+                batches.push(row?);
+            }
+            let next_cursor = if batches.len() as i64 > i64::from(limit) {
+                batches.pop().expect("page has a sentinel row");
+                // The sentinel proves another page exists; the cursor itself
+                // comes from the final returned row of this page.
+                let final_row = batches.last().expect("page has at least one row");
+                Some(encode_cursor(final_row.created_at, &final_row.id))
+            } else {
+                None
+            };
+            Ok((batches, next_cursor))
+        })
+    }
+
+    pub fn list_jobs(
+        &self,
+        batch_id: Option<&str>,
+        status: Option<&str>,
+        cursor: Option<&str>,
+        limit: u16,
+    ) -> Result<(Vec<AiJobRecord>, Option<String>)> {
+        self.store.with_ai_connection(|connection| {
+            let (cursor_created, cursor_id) = parse_cursor(cursor)?;
+            let page_size = i64::from(limit) + 1;
+            let mut sql = String::from(
+                "SELECT id,batch_id,ordinal,target_kind,target_key,target_payload_json,skill_name,
+                    expected_source_hash,status,priority,attempt_count,manual_retry_count,
+                    correction_attempted,cancel_requested,next_retry_at,error_code,error_message,
+                    created_at,updated_at,started_at,finished_at
+                 FROM ai_analysis_jobs WHERE 1=1",
+            );
+            let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+            if let Some(batch_id) = batch_id {
+                sql.push_str(" AND batch_id = ?");
+                params.push(Box::new(batch_id.to_string()));
+            }
+            if let Some(status) = status {
+                sql.push_str(" AND status = ?");
+                params.push(Box::new(status.to_string()));
+            }
+            if let (Some(created_at), Some(id)) = (cursor_created, cursor_id) {
+                sql.push_str(" AND (created_at < ? OR (created_at = ? AND id < ?))");
+                params.push(Box::new(created_at));
+                params.push(Box::new(created_at));
+                params.push(Box::new(id));
+            }
+            sql.push_str(" ORDER BY created_at DESC, id DESC LIMIT ?");
+            params.push(Box::new(page_size));
+
+            let mut statement = connection.prepare(&sql)?;
+            let rows = statement.query_map(
+                rusqlite::params_from_iter(params.iter().map(|value| value.as_ref())),
+                map_job_row,
+            )?;
+            let mut jobs = Vec::new();
+            for row in rows {
+                jobs.push(row?);
+            }
+            let next_cursor = if jobs.len() as i64 > i64::from(limit) {
+                jobs.pop().expect("page has a sentinel row");
+                let final_row = jobs.last().expect("page has at least one row");
+                Some(encode_cursor(final_row.created_at, &final_row.id))
+            } else {
+                None
+            };
+            Ok((jobs, next_cursor))
+        })
+    }
+
+    pub fn pause_batch(&self, batch_id: &str, now: i64) -> Result<Option<AiBatchRecord>> {
+        self.store.with_ai_transaction(|transaction| {
+            let changed = transaction.execute(
+                "UPDATE ai_analysis_batches
+                 SET status='paused', pause_requested=1, updated_at=?1
+                 WHERE id=?2 AND status IN ('queued','running') AND cancel_requested=0",
+                params![now, batch_id],
+            )?;
+            if changed == 0 {
+                return load_batch(transaction, batch_id);
+            }
+            load_batch(transaction, batch_id)
+        })
+    }
+
+    pub fn resume_batch(&self, batch_id: &str, now: i64) -> Result<Option<AiBatchRecord>> {
+        self.store.with_ai_transaction(|transaction| {
+            let current = load_batch(transaction, batch_id)?;
+            let Some(batch) = current else {
+                return Ok(None);
+            };
+            if batch.status != AiBatchStatus::Paused || batch.cancel_requested {
+                return Ok(Some(batch));
+            }
+            let remaining: i64 = transaction.query_row(
+                "SELECT COUNT(*) FROM ai_analysis_jobs
+                 WHERE batch_id=?1 AND status NOT IN ('succeeded','failed','cancelled')",
+                params![batch_id],
+                |row| row.get(0),
+            )?;
+            if remaining == 0 {
+                transaction.execute(
+                    "UPDATE ai_analysis_batches
+                     SET status='completed', pause_requested=0, cancel_requested=0,
+                         finished_at=?1, updated_at=?1
+                     WHERE id=?2",
+                    params![now, batch_id],
+                )?;
+            } else {
+                transaction.execute(
+                    "UPDATE ai_analysis_batches
+                     SET status='queued', pause_requested=0, updated_at=?1
+                     WHERE id=?2",
+                    params![now, batch_id],
+                )?;
+            }
+            load_batch(transaction, batch_id)
+        })
+    }
+
+    /// Cancel a batch: persist intent, move non-running jobs to cancelled, and
+    /// return running job ids so the command layer can request their cancel.
+    pub fn cancel_batch(
+        &self,
+        batch_id: &str,
+        now: i64,
+    ) -> Result<(Option<AiBatchRecord>, Vec<String>)> {
+        self.store.with_ai_transaction(|transaction| {
+            let running: Vec<String> = {
+                let mut statement = transaction.prepare(
+                    "SELECT id FROM ai_analysis_jobs
+                     WHERE batch_id=?1 AND status='running'",
+                )?;
+                let rows = statement.query_map(params![batch_id], |row| row.get(0))?;
+                rows.filter_map(|row| row.ok()).collect()
+            };
+            let changed = transaction.execute(
+                "UPDATE ai_analysis_batches
+                 SET status='cancelling', cancel_requested=1, updated_at=?1
+                 WHERE id=?2 AND status IN ('queued','running','paused') AND cancel_requested=0",
+                params![now, batch_id],
+            )?;
+            if changed == 0 {
+                return Ok((load_batch(transaction, batch_id)?, running));
+            }
+            transaction.execute(
+                "UPDATE ai_analysis_jobs
+                 SET status='cancelled', cancel_requested=1, finished_at=?1, updated_at=?1
+                 WHERE batch_id=?2 AND status IN ('queued','retry_wait','interrupted')",
+                params![now, batch_id],
+            )?;
+            let remaining: i64 = transaction.query_row(
+                "SELECT COUNT(*) FROM ai_analysis_jobs
+                 WHERE batch_id=?1 AND status NOT IN ('succeeded','failed','cancelled')",
+                params![batch_id],
+                |row| row.get(0),
+            )?;
+            if remaining == 0 {
+                transaction.execute(
+                    "UPDATE ai_analysis_batches
+                     SET status='cancelled', pause_requested=0, cancel_requested=0,
+                         finished_at=?1, updated_at=?1
+                     WHERE id=?2",
+                    params![now, batch_id],
+                )?;
+            }
+            Ok((load_batch(transaction, batch_id)?, running))
+        })
+    }
+
+    pub fn cancel_job(&self, job_id: &str, now: i64) -> Result<CancelJobOutcome> {
+        self.store.with_ai_transaction(|transaction| {
+            let current = load_job(transaction, job_id)?;
+            let Some(job) = current else {
+                return Ok(CancelJobOutcome::InvalidState);
+            };
+            match job.status {
+                AiJobStatus::Cancelled => return Ok(CancelJobOutcome::Cancelled),
+                AiJobStatus::Succeeded | AiJobStatus::Failed => {
+                    return Ok(CancelJobOutcome::InvalidState);
+                }
+                AiJobStatus::Running => {
+                    transaction.execute(
+                        "UPDATE ai_analysis_jobs SET cancel_requested=1, updated_at=?1 WHERE id=?2",
+                        params![now, job_id],
+                    )?;
+                    return Ok(CancelJobOutcome::RunningCancelled);
+                }
+                AiJobStatus::Queued | AiJobStatus::RetryWait | AiJobStatus::Interrupted => {
+                    transaction.execute(
+                        "UPDATE ai_analysis_jobs
+                         SET status='cancelled', cancel_requested=1, finished_at=?1, updated_at=?1
+                         WHERE id=?2",
+                        params![now, job_id],
+                    )?;
+                    finalize_batch(transaction, &job.batch_id, now)?;
+                    return Ok(CancelJobOutcome::Cancelled);
+                }
+            }
+        })
+    }
+
+    /// Aggregate job/batch counters for the manager page.
+    pub fn queue_counts(
+        &self,
+    ) -> Result<(
+        (i64, i64, i64, i64, i64, i64),
+        (i64, i64, i64, i64, i64, i64),
+    )> {
+        self.store.with_ai_connection(|connection| {
+            let batch_counts = connection.query_row(
+                "SELECT
+                    SUM(CASE WHEN status='queued' THEN 1 ELSE 0 END),
+                    SUM(CASE WHEN status='running' THEN 1 ELSE 0 END),
+                    SUM(CASE WHEN status='paused' THEN 1 ELSE 0 END),
+                    SUM(CASE WHEN status='cancelling' THEN 1 ELSE 0 END),
+                    SUM(CASE WHEN status='completed' THEN 1 ELSE 0 END),
+                    SUM(CASE WHEN status='cancelled' THEN 1 ELSE 0 END)
+                 FROM ai_analysis_batches",
+                [],
+                |row| {
+                    let zero = |value: Option<i64>| value.unwrap_or(0);
+                    Ok((
+                        zero(row.get(0)?),
+                        zero(row.get(1)?),
+                        zero(row.get(2)?),
+                        zero(row.get(3)?),
+                        zero(row.get(4)?),
+                        zero(row.get(5)?),
+                    ))
+                },
+            )?;
+            let job_counts = connection.query_row(
+                "SELECT
+                    SUM(CASE WHEN status='queued' THEN 1 ELSE 0 END),
+                    SUM(CASE WHEN status='running' THEN 1 ELSE 0 END),
+                    SUM(CASE WHEN status='retry_wait' THEN 1 ELSE 0 END),
+                    SUM(CASE WHEN status='interrupted' THEN 1 ELSE 0 END),
+                    SUM(CASE WHEN status='succeeded' THEN 1 ELSE 0 END),
+                    SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END)
+                 FROM ai_analysis_jobs",
+                [],
+                |row| {
+                    let zero = |value: Option<i64>| value.unwrap_or(0);
+                    Ok((
+                        zero(row.get(0)?),
+                        zero(row.get(1)?),
+                        zero(row.get(2)?),
+                        zero(row.get(3)?),
+                        zero(row.get(4)?),
+                        zero(row.get(5)?),
+                    ))
+                },
+            )?;
+            Ok((batch_counts, job_counts))
+        })
+    }
+
+    pub fn cancelled_job_count(&self) -> Result<i64> {
+        self.store.with_ai_connection(|connection| {
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM ai_analysis_jobs WHERE status='cancelled'",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(anyhow::Error::from)
+        })
+    }
 }
 
 fn insert_batch(transaction: &Transaction<'_>, batch: &AiBatchRecord) -> Result<()> {
@@ -808,6 +1129,59 @@ fn load_batch(connection: &Connection, id: &str) -> Result<Option<AiBatchRecord>
             },
         )
         .optional()?)
+}
+
+fn map_batch_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AiBatchRecord> {
+    let status: String = row.get(1)?;
+    Ok(AiBatchRecord {
+        id: row.get(0)?,
+        status: parse_batch_status(&status),
+        provider: row.get(2)?,
+        base_url: row.get(3)?,
+        model: row.get(4)?,
+        output_language: row.get(5)?,
+        prompt_version: row.get(6)?,
+        schema_version: row.get(7)?,
+        timeout_seconds: row.get(8)?,
+        input_price_micros_per_million: row.get(9)?,
+        output_price_micros_per_million: row.get(10)?,
+        estimated_input_tokens: row.get(11)?,
+        estimated_output_tokens: row.get(12)?,
+        estimated_cost_micros: row.get(13)?,
+        estimated_max_retry_cost_micros: row.get(14)?,
+        total_targets: row.get(15)?,
+        valid_documents: row.get(16)?,
+        missing_documents: row.get(17)?,
+        unreadable_documents: row.get(18)?,
+        skipped_targets: row.get(19)?,
+        pause_requested: row.get::<_, i64>(20)? != 0,
+        cancel_requested: row.get::<_, i64>(21)? != 0,
+        confirmed_at: row.get(22)?,
+        created_at: row.get(23)?,
+        updated_at: row.get(24)?,
+        finished_at: row.get(25)?,
+    })
+}
+
+/// Stable page cursor: `created_at:id`, ordered DESC. Frontend never parses it.
+fn encode_cursor(created_at: i64, id: &str) -> String {
+    format!("{created_at}:{id}")
+}
+
+fn parse_cursor(cursor: Option<&str>) -> Result<(Option<i64>, Option<String>)> {
+    let Some(cursor) = cursor else {
+        return Ok((None, None));
+    };
+    let Some((created_at, id)) = cursor.split_once(':') else {
+        bail!("invalid AI list cursor");
+    };
+    let created_at = created_at
+        .parse::<i64>()
+        .context("invalid AI list cursor")?;
+    if id.is_empty() {
+        bail!("invalid AI list cursor");
+    }
+    Ok((Some(created_at), Some(id.to_string())))
 }
 
 fn load_job(connection: &Connection, id: &str) -> Result<Option<AiJobRecord>> {
@@ -1587,5 +1961,149 @@ mod tests {
         assert_eq!(batch_status(&store, "batch-cancel-flag"), "cancelled");
         assert_eq!(job_status(&store, "job-pause-flag"), "queued");
         assert_eq!(batch_status(&store, "batch-pause-flag"), "paused");
+    }
+
+    #[test]
+    fn pause_blocks_claims_and_resume_requeues() {
+        let (_directory, store) = store();
+        let repository = AiRepository::new(&store);
+        repository
+            .insert_batch_with_jobs(
+                &claim_batch("batch-pause-resume", 1),
+                &[claim_job("job-pr", "batch-pause-resume", 0, "skill-pr")],
+            )
+            .unwrap();
+
+        let paused = repository
+            .pause_batch("batch-pause-resume", 100)
+            .unwrap()
+            .unwrap();
+        assert_eq!(paused.status, AiBatchStatus::Paused);
+        assert!(paused.pause_requested);
+        assert!(repository.claim_next_job(100).unwrap().is_none());
+
+        let resumed = repository
+            .resume_batch("batch-pause-resume", 101)
+            .unwrap()
+            .unwrap();
+        assert_eq!(resumed.status, AiBatchStatus::Queued);
+        assert!(!resumed.pause_requested);
+        assert!(repository.claim_next_job(101).unwrap().is_some());
+    }
+
+    #[test]
+    fn cancel_batch_cancels_queued_jobs_and_reports_running_ids() {
+        let (_directory, store) = store();
+        let repository = AiRepository::new(&store);
+        repository
+            .insert_batch_with_jobs(
+                &claim_batch("batch-cancel-all", 2),
+                &[
+                    claim_job("job-ca", "batch-cancel-all", 0, "skill-ca"),
+                    claim_job("job-cb", "batch-cancel-all", 1, "skill-cb"),
+                ],
+            )
+            .unwrap();
+        repository.claim_next_job(100).unwrap();
+
+        let (batch, running) = repository.cancel_batch("batch-cancel-all", 200).unwrap();
+        let batch = batch.unwrap();
+        assert_eq!(batch.status, AiBatchStatus::Cancelling);
+        assert_eq!(running, vec!["job-ca".to_string()]);
+        assert_eq!(job_status(&store, "job-ca"), "running");
+        assert_eq!(job_status(&store, "job-cb"), "cancelled");
+
+        // Simulate the running job finishing after cancellation: result is
+        // discarded and the batch reaches cancelled.
+        let outcome = repository
+            .complete_success(
+                "job-ca",
+                &AiAnalysisRecord {
+                    id: "analysis-ca".into(),
+                    target_kind: AiTargetKind::Managed,
+                    target_key: "[\"skill-ca\"]".into(),
+                    target_payload_json: "{\"kind\":\"managed\",\"skill_id\":\"skill-ca\"}".into(),
+                    skill_name: "ca".into(),
+                    source_hash: "hash".into(),
+                    schema_version: 1,
+                    prompt_version: "v1".into(),
+                    output_language: "en".into(),
+                    one_line: "discarded".into(),
+                    result_json: "{}".into(),
+                    provider: "ollama".into(),
+                    model: "local".into(),
+                    input_tokens: None,
+                    output_tokens: None,
+                    total_tokens: None,
+                    analyzed_at: 201,
+                    created_at: 201,
+                    updated_at: 201,
+                },
+                running_log("job-ca", 201),
+                201,
+            )
+            .unwrap();
+        assert_eq!(outcome, CompleteOutcome::Cancelled);
+        assert_eq!(batch_status(&store, "batch-cancel-all"), "cancelled");
+    }
+
+    #[test]
+    fn list_batches_uses_stable_descending_cursor() {
+        let (_directory, store) = store();
+        let repository = AiRepository::new(&store);
+        for index in 0..3 {
+            let batch_id = format!("batch-list-{index}");
+            repository.insert_batch(&claim_batch(&batch_id, 0)).unwrap();
+        }
+
+        let (first, cursor) = repository.list_batches(None, None, 2).unwrap();
+        assert_eq!(first.len(), 2);
+        assert!(cursor.is_some());
+        let (second, next) = repository.list_batches(None, cursor.as_deref(), 2).unwrap();
+        assert_eq!(second.len(), 1);
+        assert!(next.is_none());
+        let ids: Vec<String> = first
+            .iter()
+            .chain(second.iter())
+            .map(|batch| batch.id.clone())
+            .collect();
+        assert_eq!(
+            ids,
+            vec![
+                "batch-list-2".to_string(),
+                "batch-list-1".to_string(),
+                "batch-list-0".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn cancel_job_queued_moves_terminal_and_finalizes_batch() {
+        let (_directory, store) = store();
+        let repository = AiRepository::new(&store);
+        repository
+            .insert_batch_with_jobs(
+                &claim_batch("batch-single-cancel", 1),
+                &[claim_job(
+                    "job-single-cancel",
+                    "batch-single-cancel",
+                    0,
+                    "skill-sc",
+                )],
+            )
+            .unwrap();
+
+        assert_eq!(
+            repository.cancel_job("job-single-cancel", 100).unwrap(),
+            CancelJobOutcome::Cancelled
+        );
+        assert_eq!(job_status(&store, "job-single-cancel"), "cancelled");
+        assert_eq!(batch_status(&store, "batch-single-cancel"), "completed");
+
+        // Terminal states reject cancellation; cancelled is idempotent.
+        assert_eq!(
+            repository.cancel_job("job-single-cancel", 101).unwrap(),
+            CancelJobOutcome::Cancelled
+        );
     }
 }

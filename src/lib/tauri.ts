@@ -403,6 +403,39 @@ export interface AiBatchDto {
   finished_at: number | null;
 }
 
+export interface AiBatchPageDto {
+  items: AiBatchDto[];
+  next_cursor: string | null;
+}
+
+export interface AiJobPageDto {
+  items: AiJobDto[];
+  next_cursor: string | null;
+}
+
+export interface AiQueueStatsDto {
+  targets_total: number;
+  targets_unparsed: number;
+  targets_succeeded: number;
+  targets_stale: number;
+  targets_failed: number;
+  targets_no_document: number;
+  targets_unreadable: number;
+  batches_queued: number;
+  batches_running: number;
+  batches_paused: number;
+  batches_cancelling: number;
+  batches_completed: number;
+  batches_cancelled: number;
+  jobs_queued: number;
+  jobs_running: number;
+  jobs_retry_wait: number;
+  jobs_interrupted: number;
+  jobs_succeeded: number;
+  jobs_failed: number;
+  jobs_cancelled: number;
+}
+
 // ── Tools ──
 
 export const getToolStatus = () => invoke<ToolInfo[]>("get_tool_status");
@@ -674,6 +707,40 @@ export const getAiAnalysis = (input: { target: AiTargetRef }) =>
 
 export const listAiAnalysisSummaries = (input: { targets: AiTargetRef[] }) =>
   invoke<AiAnalysisSummaryDto[]>("list_ai_analysis_summaries", { input });
+
+export const listAiAnalysisBatches = (input: {
+  status?: string | null;
+  cursor?: string | null;
+  limit: number;
+}) => invoke<AiBatchPageDto>("list_ai_analysis_batches", { input });
+
+export const listAiAnalysisJobs = (input: {
+  batch_id?: string | null;
+  status?: string | null;
+  cursor?: string | null;
+  limit: number;
+}) => invoke<AiJobPageDto>("list_ai_analysis_jobs", { input });
+
+export const getAiAnalysisBatch = (input: { batch_id: string }) =>
+  invoke<AiBatchDto>("get_ai_analysis_batch", { input });
+
+export const getAiAnalysisQueueStats = () =>
+  invoke<AiQueueStatsDto>("get_ai_analysis_queue_stats");
+
+export const pauseAiAnalysisBatch = (input: { batch_id: string }) =>
+  invoke<AiBatchDto>("pause_ai_analysis_batch", { input });
+
+export const resumeAiAnalysisBatch = (input: { batch_id: string }) =>
+  invoke<AiBatchDto>("resume_ai_analysis_batch", { input });
+
+export const cancelAiAnalysisBatch = (input: { batch_id: string }) =>
+  invoke<AiBatchDto>("cancel_ai_analysis_batch", { input });
+
+export const cancelAiAnalysisJob = (input: { job_id: string }) =>
+  invoke<AiJobDto>("cancel_ai_analysis_job", { input });
+
+export const retryAiAnalysisJob = (input: { job_id: string; preview_id: string }) =>
+  invoke<AiBatchDto>("retry_ai_analysis_job", { input });
 
 export const appExit = () => invoke<void>("app_exit");
 

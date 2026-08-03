@@ -9,6 +9,7 @@
     "lobsterAgents": "Lobster Agents",
     "installSkills": "Install Skills",
     "backup": "Backup",
+    "aiManager": "AI Analysis Manager",
     "presets": "Presets",
     "newPreset": "New Preset",
     "projects": "Project Workspaces",
@@ -273,6 +274,52 @@
     },
     "list": {
       "stale": "Outdated"
+    },
+    "manager": {
+      "title": "AI Analysis Manager",
+      "subtitle": "Batch analysis, pause/resume/cancel, and single-job retry; progress comes from persisted backend state.",
+      "newBatch": "New batch",
+      "noSkills": "The library is empty; there are no targets to analyze.",
+      "batchEnqueued": "Batch analysis task created",
+      "retryEnqueued": "Retry task created",
+      "noBatches": "No batches yet",
+      "noJobs": "No jobs yet",
+      "statTotal": "Targets",
+      "statUnparsed": "Unparsed",
+      "statSucceeded": "Analyzed",
+      "statStale": "Outdated",
+      "statFailed": "Failed",
+      "statNoDocument": "No document",
+      "statUnreadable": "Unreadable",
+      "batches": "Batches",
+      "jobs": "Jobs",
+      "attempts": "done",
+      "pause": "Pause",
+      "resume": "Resume",
+      "cancel": "Cancel batch",
+      "cancelJob": "Cancel job",
+      "retry": "Retry",
+      "paused": "Paused",
+      "resumed": "Resumed",
+      "cancelled": "Cancelled",
+      "jobCancelled": "Job cancelled"
+    },
+    "batchStatus": {
+      "queued": "Queued",
+      "running": "Running",
+      "paused": "Paused",
+      "cancelling": "Cancelling",
+      "completed": "Completed",
+      "cancelled": "Cancelled"
+    },
+    "jobStatus": {
+      "queued": "Queued",
+      "running": "Running",
+      "retry_wait": "Retry wait",
+      "interrupted": "Interrupted",
+      "succeeded": "Succeeded",
+      "failed": "Failed",
+      "cancelled": "Cancelled"
     }
   },
   "mySkills": {

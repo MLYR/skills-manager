@@ -17,18 +17,22 @@ use crate::core::ai::preview::{
 use crate::core::ai::prompt::PROMPT_VERSION;
 use crate::core::ai::provider::{connection_message, send_minimal_completion, ProviderAttempt};
 use crate::core::ai::repository::{
-    canonical_target, target_ref_from_payload, AiRepository, TargetState,
+    canonical_target, target_ref_from_payload, AiRepository, CancelJobOutcome, TargetState,
 };
 use crate::core::ai::runner::AiRuntimeState;
 use crate::core::ai::secret_store::SecretStore;
 use crate::core::ai::types::{
     AiAnalysisDetailDto, AiAnalysisMode, AiAnalysisPreviewDto, AiAnalysisResultV1,
-    AiAnalysisStatus, AiAnalysisSummaryDto, AiApiKeyStatusDto, AiBatchDto, AiBatchRecord,
-    AiBatchStatus, AiCommandError, AiConfigDto, AiConfigInput, AiConnectionTestDto,
-    AiConnectionTestInput, AiErrorCode, AiErrorKind, AiJobRecord, AiJobStatus,
-    AiPreviewEligibility, AiProviderPresetDto, AiTargetRef,
+    AiAnalysisStatus, AiAnalysisSummaryDto, AiApiKeyStatusDto, AiBatchDto, AiBatchListInput,
+    AiBatchPageDto, AiBatchRecord, AiBatchStatus, AiCommandError, AiConfigDto, AiConfigInput,
+    AiConnectionTestDto, AiConnectionTestInput, AiErrorCode, AiErrorKind, AiJobListInput,
+    AiJobPageDto, AiJobRecord, AiJobStatus, AiPreviewEligibility, AiProviderPresetDto,
+    AiQueueStatsDto, AiTargetRef,
 };
+use crate::core::project_scanner;
 use crate::core::skill_store::SkillStore;
+use crate::core::tool_adapters;
+use std::path::Path;
 
 #[derive(Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
@@ -59,6 +63,43 @@ pub struct GetAiAnalysisInput {
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub struct ListAiAnalysisSummariesInput {
     targets: Vec<AiTargetRef>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct PauseAiBatchInput {
+    batch_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct ResumeAiBatchInput {
+    batch_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct CancelAiBatchInput {
+    batch_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct CancelAiJobInput {
+    job_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct GetAiBatchInput {
+    batch_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct RetryAiJobInput {
+    job_id: String,
+    preview_id: String,
 }
 
 #[tauri::command]
@@ -277,6 +318,496 @@ pub async fn list_ai_analysis_summaries(
             .collect()
     })
     .await
+}
+
+#[tauri::command]
+pub async fn list_ai_analysis_batches(
+    input: AiBatchListInput,
+    store: State<'_, Arc<SkillStore>>,
+) -> Result<AiBatchPageDto, AiCommandError> {
+    validate_batch_status_filter(input.status.as_deref())?;
+    if input.limit == 0 || input.limit > 100 {
+        return Err(command_error(
+            AiErrorKind::Validation,
+            AiErrorCode::InvalidState,
+            "AI batch list limit must be between 1 and 100.",
+            false,
+        ));
+    }
+    let store = store.inner().clone();
+    run_blocking(move || {
+        let repository = AiRepository::new(&store);
+        let (batches, next_cursor) = repository_result(repository.list_batches(
+            input.status.as_deref(),
+            input.cursor.as_deref(),
+            input.limit,
+        ))?;
+        let items = batches
+            .iter()
+            .map(|batch| to_batch_dto(&store, batch))
+            .collect::<Result<Vec<_>, AiCommandError>>()?;
+        Ok(AiBatchPageDto { items, next_cursor })
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn list_ai_analysis_jobs(
+    input: AiJobListInput,
+    store: State<'_, Arc<SkillStore>>,
+) -> Result<AiJobPageDto, AiCommandError> {
+    validate_job_status_filter(input.status.as_deref())?;
+    if input.limit == 0 || input.limit > 100 {
+        return Err(command_error(
+            AiErrorKind::Validation,
+            AiErrorCode::InvalidState,
+            "AI job list limit must be between 1 and 100.",
+            false,
+        ));
+    }
+    let store = store.inner().clone();
+    run_blocking(move || {
+        let repository = AiRepository::new(&store);
+        let (jobs, next_cursor) = repository_result(repository.list_jobs(
+            input.batch_id.as_deref(),
+            input.status.as_deref(),
+            input.cursor.as_deref(),
+            input.limit,
+        ))?;
+        let items = jobs
+            .iter()
+            .map(job_to_dto)
+            .collect::<Result<Vec<_>, AiCommandError>>()?;
+        Ok(AiJobPageDto { items, next_cursor })
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn get_ai_analysis_batch(
+    input: GetAiBatchInput,
+    store: State<'_, Arc<SkillStore>>,
+) -> Result<AiBatchDto, AiCommandError> {
+    let store = store.inner().clone();
+    run_blocking(move || {
+        let batch = repository_result(AiRepository::new(&store).load_batch_dto(&input.batch_id))?
+            .ok_or_else(|| {
+            command_error(
+                AiErrorKind::State,
+                AiErrorCode::NotFound,
+                "The AI analysis batch does not exist.",
+                false,
+            )
+        })?;
+        to_batch_dto(&store, &batch)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn get_ai_analysis_queue_stats(
+    store: State<'_, Arc<SkillStore>>,
+) -> Result<AiQueueStatsDto, AiCommandError> {
+    let store = store.inner().clone();
+    run_blocking(move || build_queue_stats(&store)).await
+}
+
+#[tauri::command]
+pub async fn pause_ai_analysis_batch(
+    input: PauseAiBatchInput,
+    store: State<'_, Arc<SkillStore>>,
+) -> Result<AiBatchDto, AiCommandError> {
+    let store = store.inner().clone();
+    run_blocking(move || {
+        let now = now_millis();
+        let batch = repository_result(AiRepository::new(&store).pause_batch(&input.batch_id, now))?
+            .ok_or_else(|| not_found_error("batch"))?;
+        if batch.status != AiBatchStatus::Paused {
+            return Err(command_error(
+                AiErrorKind::State,
+                AiErrorCode::InvalidState,
+                "Only queued or running batches can be paused.",
+                false,
+            ));
+        }
+        to_batch_dto(&store, &batch)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn resume_ai_analysis_batch(
+    input: ResumeAiBatchInput,
+    store: State<'_, Arc<SkillStore>>,
+) -> Result<AiBatchDto, AiCommandError> {
+    let store = store.inner().clone();
+    run_blocking(move || {
+        let now = now_millis();
+        let batch =
+            repository_result(AiRepository::new(&store).resume_batch(&input.batch_id, now))?
+                .ok_or_else(|| not_found_error("batch"))?;
+        if !matches!(
+            batch.status,
+            AiBatchStatus::Queued | AiBatchStatus::Completed
+        ) {
+            return Err(command_error(
+                AiErrorKind::State,
+                AiErrorCode::InvalidState,
+                "Only paused batches can be resumed.",
+                false,
+            ));
+        }
+        to_batch_dto(&store, &batch)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn cancel_ai_analysis_batch(
+    input: CancelAiBatchInput,
+    store: State<'_, Arc<SkillStore>>,
+    state: State<'_, Arc<AiRuntimeState>>,
+) -> Result<AiBatchDto, AiCommandError> {
+    let store = store.inner().clone();
+    let state = state.inner().clone();
+    run_blocking(move || {
+        let now = now_millis();
+        let (batch, running_jobs) =
+            repository_result(AiRepository::new(&store).cancel_batch(&input.batch_id, now))?;
+        let batch = batch.ok_or_else(|| not_found_error("batch"))?;
+        for job_id in running_jobs {
+            state.request_cancel(&job_id);
+        }
+        to_batch_dto(&store, &batch)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn cancel_ai_analysis_job(
+    input: CancelAiJobInput,
+    store: State<'_, Arc<SkillStore>>,
+    state: State<'_, Arc<AiRuntimeState>>,
+) -> Result<crate::core::ai::types::AiJobDto, AiCommandError> {
+    let store = store.inner().clone();
+    let state = state.inner().clone();
+    run_blocking(move || {
+        let now = now_millis();
+        let repository = AiRepository::new(&store);
+        let outcome = repository_result(repository.cancel_job(&input.job_id, now))?;
+        match outcome {
+            CancelJobOutcome::InvalidState => Err(command_error(
+                AiErrorKind::State,
+                AiErrorCode::InvalidState,
+                "Only queued, retry-waiting, interrupted, running, or cancelled jobs support cancellation.",
+                false,
+            )),
+            CancelJobOutcome::RunningCancelled => {
+                state.request_cancel(&input.job_id);
+                let job = repository_result(repository.get_job(&input.job_id))?
+                    .ok_or_else(|| not_found_error("job"))?;
+                job_to_dto(&job)
+            }
+            CancelJobOutcome::Cancelled => {
+                let job = repository_result(repository.get_job(&input.job_id))?
+                    .ok_or_else(|| not_found_error("job"))?;
+                job_to_dto(&job)
+            }
+        }
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn retry_ai_analysis_job(
+    input: RetryAiJobInput,
+    store: State<'_, Arc<SkillStore>>,
+    state: State<'_, Arc<AiRuntimeState>>,
+) -> Result<AiBatchDto, AiCommandError> {
+    let store = store.inner().clone();
+    let state = state.inner().clone();
+    run_blocking(move || {
+        // Atomic consumption: a retry preview can only be used once, exactly
+        // like a first-time batch confirmation.
+        let entry = consume_preview(&state.previews, &input.preview_id, now_millis())?;
+        let repository = AiRepository::new(&store);
+        let job = repository_result(repository.get_job(&input.job_id))?
+            .ok_or_else(|| not_found_error("job"))?;
+        if job.status != AiJobStatus::Failed {
+            return Err(command_error(
+                AiErrorKind::State,
+                AiErrorCode::InvalidState,
+                "Only failed jobs can be manually retried.",
+                false,
+            ));
+        }
+        if entry.items.len() != 1 || entry.mode != AiAnalysisMode::Force {
+            return Err(command_error(
+                AiErrorKind::Validation,
+                AiErrorCode::PreviewConsumed,
+                "A manual retry requires a single-target force preview.",
+                false,
+            ));
+        }
+        let item = &entry.items[0];
+        let (kind, key, payload) = canonical_target(&item.target);
+        if (kind, key.as_str()) != (job.target_kind, job.target_key.as_str()) {
+            return Err(command_error(
+                AiErrorKind::Validation,
+                AiErrorCode::PreviewConsumed,
+                "The retry preview target does not match the failed job.",
+                false,
+            ));
+        }
+        let Some(source_hash) = item.source_hash.clone() else {
+            return Err(command_error(
+                AiErrorKind::Validation,
+                AiErrorCode::PreviewConsumed,
+                "The retry preview has no document hash.",
+                false,
+            ));
+        };
+
+        let now = now_millis();
+        let batch_id = uuid::Uuid::new_v4().to_string();
+        let new_job = AiJobRecord {
+            id: uuid::Uuid::new_v4().to_string(),
+            batch_id: batch_id.clone(),
+            ordinal: 0,
+            target_kind: kind,
+            target_key: job.target_key,
+            target_payload_json: payload,
+            skill_name: item.skill_name.clone(),
+            expected_source_hash: source_hash,
+            status: AiJobStatus::Queued,
+            priority: 0,
+            attempt_count: 0,
+            manual_retry_count: job.manual_retry_count + 1,
+            correction_attempted: false,
+            cancel_requested: false,
+            next_retry_at: None,
+            error_code: None,
+            error_message: None,
+            created_at: now,
+            updated_at: now,
+            started_at: None,
+            finished_at: None,
+        };
+        let batch = AiBatchRecord {
+            id: batch_id,
+            status: AiBatchStatus::Queued,
+            provider: entry.config_snapshot.provider.clone(),
+            base_url: entry.config_snapshot.base_url.clone(),
+            model: entry.config_snapshot.model.clone(),
+            output_language: resolve_output_language(&entry.config_snapshot.output_language),
+            prompt_version: PROMPT_VERSION.to_string(),
+            schema_version: 1,
+            timeout_seconds: i64::from(entry.config_snapshot.timeout_seconds),
+            input_price_micros_per_million: entry.config_snapshot.input_price_micros_per_million,
+            output_price_micros_per_million: entry.config_snapshot.output_price_micros_per_million,
+            estimated_input_tokens: entry.estimated_input_tokens,
+            estimated_output_tokens: entry.estimated_output_tokens,
+            estimated_cost_micros: entry.estimated_cost_micros,
+            estimated_max_retry_cost_micros: entry.estimated_max_retry_cost_micros,
+            total_targets: 1,
+            valid_documents: 1,
+            missing_documents: 0,
+            unreadable_documents: 0,
+            skipped_targets: 0,
+            pause_requested: false,
+            cancel_requested: false,
+            confirmed_at: now,
+            created_at: now,
+            updated_at: now,
+            finished_at: None,
+        };
+        repository_result(repository.insert_batch_with_jobs(&batch, &[new_job]))?;
+        to_batch_dto(&store, &batch)
+    })
+    .await
+}
+
+fn build_queue_stats(store: &SkillStore) -> Result<AiQueueStatsDto, AiCommandError> {
+    let repository = AiRepository::new(store);
+    let (batch_counts, job_counts) = repository_result(repository.queue_counts())?;
+    let jobs_cancelled = repository_result(repository.cancelled_job_count())?;
+    let config = load_config(store).ok();
+
+    let mut targets = Vec::new();
+    let managed = store
+        .get_all_skills()
+        .map_err(|_| storage_error("list managed skills"))?;
+    targets.extend(
+        managed
+            .into_iter()
+            .map(|skill| AiTargetRef::Managed { skill_id: skill.id }),
+    );
+    for adapter in tool_adapters::all_tool_adapters(store) {
+        let skills = project_scanner::read_linked_workspace_skills(
+            &adapter.skills_dir(),
+            None,
+            &adapter.key,
+            &adapter.display_name,
+            adapter.recursive_scan,
+        );
+        targets.extend(skills.into_iter().map(|skill| AiTargetRef::GlobalLocal {
+            agent_key: skill.agent,
+            relative_path: skill.relative_path,
+        }));
+    }
+    let projects = store
+        .get_all_projects()
+        .map_err(|_| storage_error("list workspaces"))?;
+    for record in projects {
+        if record.workspace_type == "linked" {
+            let agent_key = record
+                .linked_agent_key
+                .clone()
+                .unwrap_or_else(|| crate::commands::projects::slugify_skill_dir_name(&record.name));
+            let agent_name = record
+                .linked_agent_name
+                .clone()
+                .unwrap_or_else(|| record.name.clone());
+            let skills = project_scanner::read_linked_workspace_skills(
+                Path::new(&record.path),
+                record.disabled_path.as_deref().map(Path::new),
+                &agent_key,
+                &agent_name,
+                true,
+            );
+            targets.extend(skills.into_iter().map(|skill| AiTargetRef::ProjectLocal {
+                project_id: record.id.clone(),
+                agent_key: skill.agent,
+                relative_path: skill.relative_path,
+            }));
+        } else {
+            let configs = crate::core::ai::document::agent_scan_configs(store);
+            let skills = project_scanner::read_project_skills(Path::new(&record.path), &configs);
+            targets.extend(skills.into_iter().map(|skill| AiTargetRef::ProjectLocal {
+                project_id: record.id.clone(),
+                agent_key: skill.agent,
+                relative_path: skill.relative_path,
+            }));
+        }
+    }
+
+    let mut seen = std::collections::HashSet::new();
+    targets.retain(|target| {
+        let (_, key, _) = canonical_target(target);
+        seen.insert(key)
+    });
+
+    let mut total = 0_i64;
+    let mut unparsed = 0_i64;
+    let mut succeeded = 0_i64;
+    let mut stale = 0_i64;
+    let mut failed = 0_i64;
+    let mut no_document = 0_i64;
+    let mut unreadable = 0_i64;
+    for target in &targets {
+        total += 1;
+        let (outcome, document) = collect_document(store, target);
+        let (kind, key, _) = canonical_target(target);
+        let state = repository_result(repository.get_target_state_by_key(&kind, &key))?;
+        let status = compute_status(
+            &outcome,
+            config.as_ref(),
+            &state,
+            document.as_ref().map(|doc| doc.source_hash.as_str()),
+        );
+        match status {
+            AiAnalysisStatus::Unparsed | AiAnalysisStatus::Unconfigured => unparsed += 1,
+            AiAnalysisStatus::Succeeded => succeeded += 1,
+            AiAnalysisStatus::Stale => stale += 1,
+            AiAnalysisStatus::Failed => failed += 1,
+            AiAnalysisStatus::NoDocument => no_document += 1,
+            AiAnalysisStatus::Unreadable => unreadable += 1,
+            AiAnalysisStatus::Queued | AiAnalysisStatus::Running | AiAnalysisStatus::Paused => {
+                unparsed += 1
+            }
+        }
+    }
+
+    Ok(AiQueueStatsDto {
+        targets_total: total,
+        targets_unparsed: unparsed,
+        targets_succeeded: succeeded,
+        targets_stale: stale,
+        targets_failed: failed,
+        targets_no_document: no_document,
+        targets_unreadable: unreadable,
+        batches_queued: batch_counts.0,
+        batches_running: batch_counts.1,
+        batches_paused: batch_counts.2,
+        batches_cancelling: batch_counts.3,
+        batches_completed: batch_counts.4,
+        batches_cancelled: batch_counts.5,
+        jobs_queued: job_counts.0,
+        jobs_running: job_counts.1,
+        jobs_retry_wait: job_counts.2,
+        jobs_interrupted: job_counts.3,
+        jobs_succeeded: job_counts.4,
+        jobs_failed: job_counts.5,
+        jobs_cancelled,
+    })
+}
+
+fn validate_batch_status_filter(status: Option<&str>) -> Result<(), AiCommandError> {
+    if let Some(status) = status {
+        if !matches!(
+            status,
+            "queued" | "running" | "paused" | "cancelling" | "completed" | "cancelled"
+        ) {
+            return Err(command_error(
+                AiErrorKind::Validation,
+                AiErrorCode::InvalidState,
+                "Invalid AI batch status filter.",
+                false,
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_job_status_filter(status: Option<&str>) -> Result<(), AiCommandError> {
+    if let Some(status) = status {
+        if !matches!(
+            status,
+            "queued"
+                | "running"
+                | "retry_wait"
+                | "interrupted"
+                | "succeeded"
+                | "failed"
+                | "cancelled"
+        ) {
+            return Err(command_error(
+                AiErrorKind::Validation,
+                AiErrorCode::InvalidState,
+                "Invalid AI job status filter.",
+                false,
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn not_found_error(subject: &str) -> AiCommandError {
+    command_error(
+        AiErrorKind::State,
+        AiErrorCode::NotFound,
+        format!("The AI analysis {subject} does not exist."),
+        false,
+    )
+}
+
+fn storage_error(operation: &str) -> AiCommandError {
+    command_error(
+        AiErrorKind::Storage,
+        AiErrorCode::Db,
+        format!("Unable to {operation}."),
+        true,
+    )
 }
 
 fn build_preview(

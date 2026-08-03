@@ -1,8 +1,8 @@
 # AI 解读开发进度
 
 更新时间：2026-08-03
-当前状态：阶段3已完成（详情与列表接入）；阶段4待启动
-已验收进度：70%
+当前状态：阶段4已完成（批量任务与持久恢复）；阶段5待启动
+已验收进度：85%
 
 进度只按通过验收门的阶段权重计算。代码写完但未验证的阶段保持“待验收”，不计入已验收进度。
 
@@ -14,7 +14,7 @@
 | 1. 数据库和AI配置 | 20% | 已完成 | 20% | Rust数据Agent `phase1_data`、Rust服务/React Agent `phase1_backend_service` | 主会话定向回归通过；全新只读Code Reviewer未发现P0/P1/P2，阶段1可验收 |
 | 2. 单个Skill解析闭环 | 25% | 已完成 | 25% | 主会话（用户授权直连实现+自审验收） | 用户2026-08-03授权“阶段2以主会话自审验收”；56项定向测试通过，全量461通过（5项为沙箱禁绑TCP环境限制），无范围外修改 |
 | 3. 详情与列表接入 | 20% | 已完成 | 20% | 主会话（用户授权直连实现+自审验收） | 用户授权“阶段3会话自审验收”；主会话diff检查+eslint/tsc/i18n同构通过，未发现P0/P1 |
-| 4. 批量任务与持久恢复 | 15% | 未开始 | 0% | 待分配 | — |
+| 4. 批量任务与持久恢复 | 15% | 已完成 | 15% | 主会话（用户授权直连实现+自审验收） | 批量控制Commands/管理页/分页/统计/单项重试已实现；Rust全量470 passed（含网络测试），eslint/tsc/i18n通过 |
 | 5. 日志、安全与收尾 | 15% | 未开始 | 0% | 待分配 | — |
 | **合计** | **100%** |  | **25%** |  |  |
 
@@ -111,6 +111,7 @@
 | 2026-08-03 | 文档解除强制子代理要求 | 用户要求“不指定要使用子代理来进行任务”：`AGENTS.md`、`04-agent-rules.md`、`02-development-process.md`、`01-overall-plan.md`（§13与§13.8）及README改为主会话可直连实现/自审，子代理仅作可选委派；R-009随之解除 |
 | 2026-08-03 | 阶段3以主会话自审验收 | 用户授权“阶段3会话自审验收”；主会话自审未发现P0/P1，eslint/tsc/i18n同构与diff检查通过，阶段3计入20%，累计70% |
 | 2026-08-03 | 新增每阶段验收后先提交再进下一阶段规则 | 用户要求“每个阶段验收完成后都提交代码再进行下一阶段”；已写入`AGENTS.md`与`02-development-process.md`，后续阶段按此执行 |
+| 2026-08-03 | 阶段4实现完成并自审验收 | 批量控制（暂停/继续/取消批次、取消任务、单项重试）、分页列表、队列统计与AI管理页落地；Rust全量470 passed（含网络测试，沙箱已允许回环绑定）、eslint/tsc/i18n通过；阶段4计入15%，累计85% |
 
 ## 12. 阶段3执行记录（已完成）
 
@@ -146,6 +147,30 @@
 - 用户授权“阶段3会话自审验收”；主会话执行只读自审：逐项核对三类详情面板默认AI标签与目标身份、状态机全部公开状态、结构化八字段+免责声明+示例复制、预览确认后再入队、列表摘要回退链与搜索匹配，未发现P0/P1。
 - 验证证据：`npx tsc -b --pretty false`无错误；`npm run lint`通过；三语`ai`对象44个叶子键同构；`git diff --check`通过；前端未启动/构建/打包（交付命令：`npm run dev`/`npm run build`/`npm run tauri:build`）。
 - 阶段3计入20%，累计进度70%；按新规则在本阶段验收后先提交代码，再进入阶段4。
+
+## 13. 阶段4执行记录（已完成）
+
+负责人：主会话（用户授权直连实现+自审验收）
+开始时间：2026-08-03
+文件范围：`src-tauri/src/core/ai/repository.rs`、`src-tauri/src/commands/ai.rs`、`src-tauri/src/core/ai/document.rs`（仅`agent_scan_configs`可见性）、`src-tauri/src/lib.rs`；前端`src/App.tsx`、`src/components/Sidebar.tsx`、`src/views/AiAnalysisManager.tsx`、`src/lib/tauri.ts`、`src/i18n/{zh,en,zh-TW}.json`。
+接口变化：新增`list_ai_analysis_batches`、`list_ai_analysis_jobs`、`get_ai_analysis_batch`、`get_ai_analysis_queue_stats`、`pause_ai_analysis_batch`、`resume_ai_analysis_batch`、`cancel_ai_analysis_batch`、`cancel_ai_analysis_job`、`retry_ai_analysis_job`九个Command。
+
+实现结果：
+
+- Repository：稳定游标分页（`created_at DESC,id DESC`、cursor由本页最后一行编码）、批次暂停/继续（保留任务原状态）、批次取消（未运行任务终态、返回运行中任务ID供取消句柄）、单任务取消（running仅置标志、终态拒绝、cancelled幂等）、失败Job单项重试（仅接受failed+单目标force预览，`manual_retry_count+1`创建新批次）、队列统计。
+- Commands：九个阶段4命令全部注册；重试预览原子消费；取消批次/任务接入`AiRuntimeState`取消句柄。
+- 管理页：统计卡片、批次列表与进度条、暂停/继续/取消、任务列表（状态/尝试次数/错误/取消/重试）、新建批量（中心库`missing_or_stale`）与单项重试均走真实预览确认；批次/任务每2秒读取后端持久状态，统计仅在初始与操作后刷新（避免高频全量扫描）。
+- i18n：新增`ai.manager`（21键）、`ai.batchStatus`（6）、`ai.jobStatus`（7）与`sidebar.aiManager`，三语同构。
+
+验证结果：
+
+- `rtk cargo check`：通过。
+- 全量`rtk cargo test`：470 passed，0 failed（沙箱已允许回环绑定，此前4+1项网络测试本次全部通过）。
+- `npx tsc -b --pretty false`、`npm run lint`：通过。
+- 三语`ai`对象84个叶子键同构；`git diff --check`通过。
+- 前端启动/构建/打包命令：`npm run dev`、`npm run build`、`npm run tauri:build`。
+
+验收结论：主会话自审未发现P0/P1；阶段4计入15%，累计85%。按新规则先提交本阶段代码，再进入阶段5。
 
 ## 7. 阶段0执行记录（阻塞）
 

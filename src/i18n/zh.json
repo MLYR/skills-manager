@@ -9,6 +9,7 @@
     "lobsterAgents": "龙虾 Agent",
     "installSkills": "安装 Skills",
     "backup": "备份",
+    "aiManager": "AI 解读管理",
     "presets": "Preset",
     "newPreset": "新建 Preset",
     "projects": "项目工作区",
@@ -273,6 +274,52 @@
     },
     "list": {
       "stale": "待更新"
+    },
+    "manager": {
+      "title": "AI 解读管理",
+      "subtitle": "批量解析、暂停/继续/取消与单项重试；进度来自后端持久状态。",
+      "newBatch": "新建批量解析",
+      "noSkills": "技能库为空，没有可解析的目标。",
+      "batchEnqueued": "批量解析任务已创建",
+      "retryEnqueued": "重试任务已创建",
+      "noBatches": "暂无批次",
+      "noJobs": "暂无任务",
+      "statTotal": "目标总数",
+      "statUnparsed": "未解析",
+      "statSucceeded": "已解析",
+      "statStale": "待更新",
+      "statFailed": "失败",
+      "statNoDocument": "无文档",
+      "statUnreadable": "不可读",
+      "batches": "批次",
+      "jobs": "任务",
+      "attempts": "已完成",
+      "pause": "暂停",
+      "resume": "继续",
+      "cancel": "取消批次",
+      "cancelJob": "取消任务",
+      "retry": "重试",
+      "paused": "已暂停",
+      "resumed": "已继续",
+      "cancelled": "已取消",
+      "jobCancelled": "任务已取消"
+    },
+    "batchStatus": {
+      "queued": "排队中",
+      "running": "运行中",
+      "paused": "已暂停",
+      "cancelling": "取消中",
+      "completed": "已完成",
+      "cancelled": "已取消"
+    },
+    "jobStatus": {
+      "queued": "排队中",
+      "running": "运行中",
+      "retry_wait": "等待重试",
+      "interrupted": "已中断",
+      "succeeded": "成功",
+      "failed": "失败",
+      "cancelled": "已取消"
     }
   },
   "mySkills": {
