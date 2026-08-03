@@ -1143,6 +1143,9 @@ export const slugifySkillNames = (names: string[]) =>
 
 // ── Agent Local Workspace ──
 
+export const getGlobalLocalSkillHeaders = (agent: string) =>
+  invoke<ProjectSkill[]>("get_global_local_skill_headers", { agent });
+
 export const getGlobalLocalSkills = (agent: string) =>
   invoke<ProjectSkill[]>("get_global_local_skills", { agent });
 

@@ -1099,6 +1099,7 @@ pub fn run() {
             commands::projects::delete_project_skill,
             commands::projects::slugify_skill_names,
             // Agent local workspace
+            commands::agent_workspace::get_global_local_skill_headers,
             commands::agent_workspace::get_global_local_skills,
             commands::agent_workspace::get_global_local_skill_document,
             commands::agent_workspace::import_global_local_skill_to_center,

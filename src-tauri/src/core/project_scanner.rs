@@ -60,6 +60,7 @@ pub fn read_project_skills(
             &config.display_name,
             &mut skills,
             true,
+            true,
         );
         read_skills_from_dir(
             &disabled_dir,
@@ -67,6 +68,7 @@ pub fn read_project_skills(
             &config.key,
             &config.display_name,
             &mut skills,
+            true,
             true,
         );
     }
@@ -82,6 +84,44 @@ pub fn read_linked_workspace_skills(
     agent_display_name: &str,
     recursive: bool,
 ) -> Vec<ProjectSkillInfo> {
+    read_linked_workspace_skills_internal(
+        skills_root,
+        disabled_root,
+        agent_key,
+        agent_display_name,
+        recursive,
+        true,
+    )
+}
+
+/// Read the fields needed to paint an Agent list without hashing every file.
+/// Full metadata is still collected by `read_linked_workspace_skills` in the
+/// background before sync status or AI target identity is finalized.
+pub fn read_linked_workspace_skill_headers(
+    skills_root: &Path,
+    disabled_root: Option<&Path>,
+    agent_key: &str,
+    agent_display_name: &str,
+    recursive: bool,
+) -> Vec<ProjectSkillInfo> {
+    read_linked_workspace_skills_internal(
+        skills_root,
+        disabled_root,
+        agent_key,
+        agent_display_name,
+        recursive,
+        false,
+    )
+}
+
+fn read_linked_workspace_skills_internal(
+    skills_root: &Path,
+    disabled_root: Option<&Path>,
+    agent_key: &str,
+    agent_display_name: &str,
+    recursive: bool,
+    include_content_metadata: bool,
+) -> Vec<ProjectSkillInfo> {
     let mut skills = Vec::new();
     read_skills_from_dir(
         skills_root,
@@ -90,6 +130,7 @@ pub fn read_linked_workspace_skills(
         agent_display_name,
         &mut skills,
         recursive,
+        include_content_metadata,
     );
     if let Some(disabled_root) = disabled_root {
         read_skills_from_dir(
@@ -99,6 +140,7 @@ pub fn read_linked_workspace_skills(
             agent_display_name,
             &mut skills,
             recursive,
+            include_content_metadata,
         );
     }
     skills.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
@@ -125,6 +167,7 @@ fn read_skills_from_dir(
     agent_display_name: &str,
     skills: &mut Vec<ProjectSkillInfo>,
     recursive: bool,
+    include_content_metadata: bool,
 ) {
     if !dir.is_dir() {
         return;
@@ -142,6 +185,7 @@ fn read_skills_from_dir(
         skills,
         &mut visited,
         recursive,
+        include_content_metadata,
     );
 }
 
@@ -154,6 +198,7 @@ fn read_skills_from_dir_recursive(
     skills: &mut Vec<ProjectSkillInfo>,
     visited: &mut std::collections::HashSet<PathBuf>,
     recursive: bool,
+    include_content_metadata: bool,
 ) {
     let Ok(entries) = std::fs::read_dir(current) else {
         return;
@@ -185,13 +230,17 @@ fn read_skills_from_dir_recursive(
             let files = list_files(&path);
 
             // One recursive walk feeds both the content hash and the
-            // last-modified time (#248). Previously this ran three separate
-            // walks per skill: `hash_directory`, plus `latest_modified_millis`
-            // which called `canonicalize()` on every node, so the workspace
-            // scan cost scaled at ~3× the necessary syscalls per skill.
-            let content_entries = content_hash::list_content_files(&path);
-            let content_hash = Some(content_hash::hash_entries(&content_entries));
-            let last_modified_at = content_hash::latest_modified_ms(&content_entries);
+            // last-modified time (#248). The header path deliberately skips
+            // this work so the Agent list can paint before sync enrichment.
+            let (content_hash, last_modified_at) = if include_content_metadata {
+                let content_entries = content_hash::list_content_files(&path);
+                (
+                    Some(content_hash::hash_entries(&content_entries)),
+                    content_hash::latest_modified_ms(&content_entries),
+                )
+            } else {
+                (None, None)
+            };
 
             skills.push(ProjectSkillInfo {
                 name,
@@ -237,6 +286,7 @@ fn read_skills_from_dir_recursive(
             skills,
             visited,
             recursive,
+            include_content_metadata,
         );
     }
 }
@@ -317,7 +367,10 @@ fn list_files(dir: &Path) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{read_linked_workspace_skills, read_project_skills, AgentSkillConfig};
+    use super::{
+        read_linked_workspace_skill_headers, read_linked_workspace_skills, read_project_skills,
+        AgentSkillConfig,
+    };
     use std::fs;
     use tempfile::tempdir;
 
@@ -476,5 +529,25 @@ mod tests {
 
         assert_eq!(skills.len(), 1);
         assert_eq!(skills[0].name, "codex-tool");
+    }
+
+    #[test]
+    fn linked_workspace_headers_skip_content_metadata() {
+        let tmp = tempdir().unwrap();
+        let skills_root = tmp.path().join("skills");
+        let skill = skills_root.join("fast-list");
+        fs::create_dir_all(skill.join("scripts")).unwrap();
+        fs::write(skill.join("SKILL.md"), "---\nname: fast-list\n---\n").unwrap();
+        fs::write(skill.join("scripts").join("run.sh"), "echo ok\n").unwrap();
+
+        let headers =
+            read_linked_workspace_skill_headers(&skills_root, None, "codex", "Codex", false);
+        let full = read_linked_workspace_skills(&skills_root, None, "codex", "Codex", false);
+
+        assert_eq!(headers.len(), 1);
+        assert_eq!(headers[0].name, "fast-list");
+        assert_eq!(headers[0].files, vec!["SKILL.md"]);
+        assert!(headers[0].content_hash.is_none());
+        assert!(full[0].content_hash.is_some());
     }
 }

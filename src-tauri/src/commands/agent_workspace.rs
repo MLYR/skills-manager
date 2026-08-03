@@ -48,6 +48,18 @@ fn read_agent_local_skills(
     )
 }
 
+fn read_agent_local_skill_headers(
+    adapter: &tool_adapters::ToolAdapter,
+) -> Vec<project_scanner::ProjectSkillInfo> {
+    project_scanner::read_linked_workspace_skill_headers(
+        &adapter.skills_dir(),
+        None,
+        &adapter.key,
+        &adapter.display_name,
+        adapter.recursive_scan,
+    )
+}
+
 fn enrich_center_status(
     mut skills: Vec<project_scanner::ProjectSkillInfo>,
     all_managed: &[SkillRecord],
@@ -136,6 +148,21 @@ fn find_verified_center_match<'a>(
         })
         .max_by_key(|(_, score)| *score)
         .map(|(managed, _)| managed)
+}
+
+#[tauri::command]
+pub async fn get_global_local_skill_headers(
+    store: State<'_, Arc<SkillStore>>,
+    agent: String,
+) -> Result<Vec<project_scanner::ProjectSkillInfo>, AppError> {
+    let store = store.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let adapter = adapter_for_agent(&store, &agent)?;
+        // This command intentionally avoids DB enrichment and content hashes;
+        // the full command runs after the first paint to supply exact status.
+        Ok(read_agent_local_skill_headers(&adapter))
+    })
+    .await?
 }
 
 #[tauri::command]

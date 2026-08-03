@@ -26,8 +26,16 @@ import { DetailSheet } from "../components/DetailSheet";
 import { SkillMarkdown } from "../components/SkillMarkdown";
 import { DocumentDiffViewer } from "../components/DocumentDiffViewer";
 import { AiAnalysisPanel } from "../components/ai/AiAnalysisPanel";
+import { AiAnalysisStatusBadge } from "../components/ai/AiAnalysisStatusBadge";
+import { AiSummaryText } from "../components/ai/AiSummaryText";
 import * as api from "../lib/tauri";
-import type { ManagedSkill, ProjectSkill } from "../lib/tauri";
+import type {
+  AiAnalysisStatus,
+  AiAnalysisSummaryDto,
+  AiTargetRef,
+  ManagedSkill,
+  ProjectSkill,
+} from "../lib/tauri";
 import { getErrorMessage } from "../lib/error";
 import { getTagActiveColor, getTagColor, UNTAGGED_FILTER } from "../lib/skillTags";
 import { AddSkillsSheet } from "../components/AddSkillsSheet";
@@ -35,6 +43,74 @@ import type { WorkspaceConfig } from "./workspaceConfigs";
 
 function compactHomePath(path: string) {
   return path.replace(/^\/Users\/[^/]+/, "~");
+}
+
+function globalSkillAiTarget(skill: ProjectSkill, agentKey: string): AiTargetRef {
+  // An in-sync local copy is byte-for-byte the managed Skill, so both detail
+  // pages must address its single managed analysis record. Diverged/local-only
+  // copies remain separate to avoid presenting an analysis of different text.
+  if (skill.center_skill_id && skill.sync_status === "in_sync") {
+    return { kind: "managed", skill_id: skill.center_skill_id };
+  }
+  return {
+    kind: "global_local",
+    agent_key: agentKey,
+    relative_path: skill.relative_path,
+  };
+}
+
+function aiTargetKey(target: AiTargetRef) {
+  switch (target.kind) {
+    case "managed":
+      return `managed:${target.skill_id}`;
+    case "global_local":
+      return `global:${target.agent_key}:${target.relative_path}`;
+    case "project_local":
+      return `project:${target.project_id}:${target.agent_key}:${target.relative_path}`;
+  }
+}
+
+const localSkillsCache = new Map<string, ProjectSkill[]>();
+const localSkillHeaderRequests = new Map<string, Promise<ProjectSkill[]>>();
+const localSkillsRequests = new Map<string, Promise<ProjectSkill[]>>();
+
+function fetchLocalSkillHeaders(agentKey: string, forceRefresh = false) {
+  if (forceRefresh) localSkillHeaderRequests.delete(agentKey);
+  const existing = localSkillHeaderRequests.get(agentKey);
+  if (existing) return existing;
+
+  const request = api.getGlobalLocalSkillHeaders(agentKey);
+  localSkillHeaderRequests.set(agentKey, request);
+  void request.then(
+    () => {
+      if (localSkillHeaderRequests.get(agentKey) === request) localSkillHeaderRequests.delete(agentKey);
+    },
+    () => {
+      if (localSkillHeaderRequests.get(agentKey) === request) localSkillHeaderRequests.delete(agentKey);
+    },
+  );
+  return request;
+}
+
+function fetchFullLocalSkills(agentKey: string, forceRefresh = false) {
+  if (forceRefresh) localSkillsRequests.delete(agentKey);
+  const existing = localSkillsRequests.get(agentKey);
+  if (existing) return existing;
+
+  const request = api.getGlobalLocalSkills(agentKey);
+  localSkillsRequests.set(agentKey, request);
+  // Keep the cache/request maps process-local; no Skill content is persisted
+  // outside the existing Rust scanner and a rejected request must not poison
+  // later refreshes.
+  void request.then(
+    () => {
+      if (localSkillsRequests.get(agentKey) === request) localSkillsRequests.delete(agentKey);
+    },
+    () => {
+      if (localSkillsRequests.get(agentKey) === request) localSkillsRequests.delete(agentKey);
+    },
+  );
+  return request;
 }
 
 interface WorkspaceSkillCardTag {
@@ -53,6 +129,8 @@ function WorkspaceSkillCard({
   description,
   tags = [],
   status,
+  aiStatus,
+  aiSummary,
   fileCount = 0,
   active = false,
   actions,
@@ -64,17 +142,26 @@ function WorkspaceSkillCard({
   description?: string | null;
   tags?: WorkspaceSkillCardTag[];
   status: WorkspaceSkillCardStatus;
+  aiStatus: AiAnalysisStatus;
+  aiSummary?: AiAnalysisSummaryDto | null;
   fileCount?: number;
   active?: boolean;
   actions?: ReactNode;
   actionsHover?: boolean;
   onClick: () => void;
 }) {
+  // Match the Skills page: only completed analyses replace the original
+  // description, so queued or failed work never hides useful local context.
+  const displayAiSummary =
+    aiSummary?.status === "succeeded" || aiSummary?.status === "stale"
+      ? aiSummary
+      : null;
+
   if (viewMode === "list") {
     return (
       <div
         className={cn(
-          "app-panel group relative flex cursor-pointer items-center gap-3.5 rounded-xl border-transparent px-3.5 py-3 transition-all hover:border-border hover:bg-surface-hover",
+          "app-panel group relative flex min-w-0 cursor-pointer items-center gap-3.5 rounded-xl border-transparent px-3.5 py-3 transition-all hover:border-border hover:bg-surface-hover",
           active && "border-l-2 border-l-accent"
         )}
         onClick={onClick}
@@ -85,9 +172,17 @@ function WorkspaceSkillCard({
         >
           {title}
         </h3>
-        <p className="min-w-0 flex-1 truncate text-[13px] text-muted">
-          {description || "-"}
-        </p>
+        {displayAiSummary ? (
+          <AiSummaryText
+            oneLine={displayAiSummary.one_line}
+            stale={displayAiSummary.is_stale}
+            className="min-w-0 flex-1 text-[13px] text-muted"
+          />
+        ) : (
+          <p className="min-w-0 flex-1 truncate text-[13px] text-muted">
+            {description || "-"}
+          </p>
+        )}
         {tags.length > 0 && (
           <div className="flex shrink-0 items-center gap-1.5">
             {tags.map((tag) => (
@@ -104,6 +199,7 @@ function WorkspaceSkillCard({
           </div>
         )}
         <div className="flex shrink-0 items-center gap-2.5">
+          <AiAnalysisStatusBadge status={aiStatus} />
           <span className={cn("rounded-full px-2 py-0.5 text-[12px] font-medium", status.className)}>
             {status.label}
           </span>
@@ -131,14 +227,14 @@ function WorkspaceSkillCard({
   return (
     <div
       className={cn(
-        "app-panel group relative flex h-full cursor-pointer flex-col overflow-hidden transition-all hover:border-border hover:bg-surface-hover",
+        "app-panel group relative flex h-full min-w-0 cursor-pointer flex-col overflow-hidden transition-all hover:border-border hover:bg-surface-hover",
         active && "border-l-2 border-l-accent"
       )}
       onClick={onClick}
     >
-      <div className="flex items-center gap-2.5 px-3.5 pt-3 pb-1.5">
+      <div className="flex min-w-0 items-center gap-2.5 px-3.5 pt-3 pb-1.5">
         <h3
-          className="flex-1 truncate text-[14px] font-semibold text-primary group-hover:text-accent-light"
+          className="min-w-0 flex-1 truncate text-[14px] font-semibold text-primary group-hover:text-accent-light"
           title={title}
         >
           {title}
@@ -150,10 +246,19 @@ function WorkspaceSkillCard({
           </span>
         )}
       </div>
-      <div className="px-3.5 pb-3">
-        <p className="truncate text-[13px] leading-[18px] text-muted">
-          {description || "-"}
-        </p>
+      <div className="min-w-0 overflow-hidden px-3.5 pb-3">
+        {displayAiSummary ? (
+          <AiSummaryText
+            oneLine={displayAiSummary.one_line}
+            stale={displayAiSummary.is_stale}
+            multiline
+            className="w-full text-[13px] leading-[18px] text-muted"
+          />
+        ) : (
+          <p className="line-clamp-2 break-words text-[13px] leading-[18px] text-muted" title={description || "-"}>
+            {description || "-"}
+          </p>
+        )}
         {tags.length > 0 && (
           <div className="mt-2 flex flex-wrap items-center gap-1">
             {tags.map((tag) => (
@@ -171,9 +276,13 @@ function WorkspaceSkillCard({
         )}
       </div>
       <div className="mt-auto flex items-center justify-between gap-2 border-t border-border-subtle px-3.5 py-2.5">
-        <span className={cn("rounded-full px-2 py-0.5 text-[12px] font-medium", status.className)}>
-          {status.label}
-        </span>
+        <div className="flex min-w-0 items-center gap-1.5">
+          <span className={cn("rounded-full px-2 py-0.5 text-[12px] font-medium", status.className)}>
+            {status.label}
+          </span>
+          {/* Keep the AI state in the fixed metadata footer instead of competing with the description. */}
+          <AiAnalysisStatusBadge status={aiStatus} />
+        </div>
         {actions && <div className="flex shrink-0 items-center gap-1.5">{actions}</div>}
       </div>
     </div>
@@ -223,6 +332,10 @@ export function WorkspaceView({ config }: { config: WorkspaceConfig }) {
   const [removingLocalSkillId, setRemovingLocalSkillId] = useState<string | null>(null);
   const [localSkills, setLocalSkills] = useState<ProjectSkill[]>([]);
   const [localSkillsLoading, setLocalSkillsLoading] = useState(false);
+  const [localSkillsRefreshing, setLocalSkillsRefreshing] = useState(false);
+  const [localSkillsReady, setLocalSkillsReady] = useState(false);
+  const [localAiSummaries, setLocalAiSummaries] = useState<Record<string, AiAnalysisSummaryDto>>({});
+  const localAiSummariesRequestRef = useRef(0);
   const [localActionKey, setLocalActionKey] = useState<string | null>(null);
   const [localDetailSkill, setLocalDetailSkill] = useState<ProjectSkill | null>(null);
   const [localDocContent, setLocalDocContent] = useState<string | null>(null);
@@ -292,23 +405,65 @@ export function WorkspaceView({ config }: { config: WorkspaceConfig }) {
   const currentToolKey = currentTool?.key ?? null;
 
   const localSkillsRequestRef = useRef(0);
-  const loadLocalSkills = useCallback(async () => {
+  const loadLocalSkills = useCallback(async (forceRefresh = false) => {
     const requestId = ++localSkillsRequestRef.current;
     if (!currentToolKey) {
       setLocalSkills([]);
+      setLocalSkillsLoading(false);
+      setLocalSkillsRefreshing(false);
+      setLocalSkillsReady(false);
       return;
     }
-    setLocalSkillsLoading(true);
+
+    if (forceRefresh) localSkillsCache.delete(currentToolKey);
+    const cachedSkills = localSkillsCache.get(currentToolKey);
+    const hasCachedSkills = !!cachedSkills;
+    if (cachedSkills) {
+      setLocalSkills(cachedSkills);
+      setLocalSkillsLoading(false);
+      setLocalSkillsReady(true);
+    } else {
+      // Clear a previous Agent's rows before the lightweight scan returns.
+      setLocalSkills([]);
+      setLocalSkillsLoading(true);
+      setLocalSkillsReady(false);
+    }
+    setLocalSkillsRefreshing(true);
+
+    let headersLoaded = hasCachedSkills;
     try {
-      const skills = await api.getGlobalLocalSkills(currentToolKey);
-      if (localSkillsRequestRef.current === requestId) setLocalSkills(skills);
+      if (!hasCachedSkills) {
+        try {
+          const headers = await fetchLocalSkillHeaders(currentToolKey, forceRefresh);
+          if (localSkillsRequestRef.current === requestId) {
+            setLocalSkills(headers);
+            setLocalSkillsLoading(false);
+          }
+          headersLoaded = true;
+        } catch {
+          // The full scan below is the compatibility fallback if a build does
+          // not expose the lightweight command yet.
+        }
+      }
+
+      const skills = await fetchFullLocalSkills(currentToolKey, forceRefresh);
+      localSkillsCache.set(currentToolKey, skills);
+      if (localSkillsRequestRef.current === requestId) {
+        setLocalSkills(skills);
+        setLocalSkillsReady(true);
+      }
     } catch (error: unknown) {
       if (localSkillsRequestRef.current === requestId) {
         toast.error(getErrorMessage(error, t("common.error")));
-        setLocalSkills([]);
+        // Keep the lightweight list visible if enrichment fails; status and
+        // center links remain conservative until the next refresh succeeds.
+        if (!headersLoaded && !hasCachedSkills) setLocalSkills([]);
       }
     } finally {
-      if (localSkillsRequestRef.current === requestId) setLocalSkillsLoading(false);
+      if (localSkillsRequestRef.current === requestId) {
+        setLocalSkillsLoading(false);
+        setLocalSkillsRefreshing(false);
+      }
     }
   }, [currentToolKey, t]);
 
@@ -317,6 +472,9 @@ export function WorkspaceView({ config }: { config: WorkspaceConfig }) {
     if (!currentToolKey) {
       loadedAgentKeyRef.current = null;
       setLocalSkills([]);
+      setLocalSkillsLoading(false);
+      setLocalSkillsRefreshing(false);
+      setLocalSkillsReady(false);
       return;
     }
     if (loadedAgentKeyRef.current === currentToolKey) return;
@@ -327,6 +485,37 @@ export function WorkspaceView({ config }: { config: WorkspaceConfig }) {
       loadedAgentKeyRef.current = null;
     };
   }, [currentToolKey, loadLocalSkills]);
+
+  useEffect(() => {
+    localAiSummariesRequestRef.current += 1;
+    const requestId = localAiSummariesRequestRef.current;
+    if (!currentToolKey || localSkills.length === 0 || !localSkillsReady) {
+      setLocalAiSummaries({});
+      return;
+    }
+    const targetKeys = new Map<string, string[]>();
+    const targets = localSkills.map((skill) => {
+      const target = globalSkillAiTarget(skill, currentToolKey);
+      const key = aiTargetKey(target);
+      targetKeys.set(key, [...(targetKeys.get(key) ?? []), skill.relative_path]);
+      return target;
+    });
+    api
+      .listAiAnalysisSummaries({ targets })
+      .then((summaries) => {
+        if (requestId !== localAiSummariesRequestRef.current) return;
+        const next: Record<string, AiAnalysisSummaryDto> = {};
+        for (const summary of summaries) {
+          for (const relativePath of targetKeys.get(aiTargetKey(summary.target)) ?? []) {
+            next[relativePath] = summary;
+          }
+        }
+        setLocalAiSummaries(next);
+      })
+      .catch(() => {
+        if (requestId === localAiSummariesRequestRef.current) setLocalAiSummaries({});
+      });
+  }, [currentToolKey, localSkills, localSkillsReady]);
 
   // Load real on-disk skill counts for every installed agent while the overview
   // is shown (#287). Scoped to the overview (currentToolKey === null); the
@@ -342,7 +531,7 @@ export function WorkspaceView({ config }: { config: WorkspaceConfig }) {
       const entries = await Promise.all(
         installedTools.map(async (tool) => {
           try {
-            const skills = await api.getGlobalLocalSkills(tool.key);
+            const skills = await fetchLocalSkillHeaders(tool.key);
             return [tool.key, skills.length] as const;
           } catch {
             // Keep the managed-count fallback for an agent that fails to scan.
@@ -417,17 +606,10 @@ export function WorkspaceView({ config }: { config: WorkspaceConfig }) {
         return true;
       })
       .sort((a, b) => {
-        const priority: Record<ProjectSkill["sync_status"], number> = {
-          project_only: 0,
-          project_newer: 1,
-          diverged: 2,
-          center_newer: 3,
-          in_sync: 4,
-        };
-        return (
-          priority[a.sync_status] - priority[b.sync_status] ||
-          a.name.localeCompare(b.name)
-        );
+        // Sync state remains visible as a badge, but must not change the
+        // alphabetical order shared with the central Skills library.
+        return a.name.localeCompare(b.name, undefined, { sensitivity: "base" }) ||
+          a.relative_path.localeCompare(b.relative_path, undefined, { sensitivity: "base" });
       });
   }, [localSkills, search, tagFilters]);
 
@@ -458,7 +640,9 @@ export function WorkspaceView({ config }: { config: WorkspaceConfig }) {
     setRemovingLocalSkillId(skill.relative_path);
     try {
       await api.unsyncSkillFromTool(skill.center_skill_id, agentKey);
-      await Promise.all([refreshManagedSkills(), refreshTools(), loadLocalSkills()]);
+      // The sync command changed files on disk; bypass the process cache so
+      // status, counts, and AI target identity reflect the just-written copy.
+      await Promise.all([refreshManagedSkills(), refreshTools(), loadLocalSkills(true)]);
       toast.success(t("globalWorkspace.removedToast", { name: skill.name }));
     } catch (e) {
       toast.error(getErrorMessage(e, t("common.error")));
@@ -468,7 +652,7 @@ export function WorkspaceView({ config }: { config: WorkspaceConfig }) {
   };
 
   const handleSheetInstalled = useCallback(async () => {
-    await Promise.all([refreshManagedSkills(), refreshTools(), loadLocalSkills()]);
+    await Promise.all([refreshManagedSkills(), refreshTools(), loadLocalSkills(true)]);
   }, [loadLocalSkills, refreshManagedSkills, refreshTools]);
 
   const handleUploadLocalSkill = useCallback(
@@ -479,7 +663,7 @@ export function WorkspaceView({ config }: { config: WorkspaceConfig }) {
       try {
         await api.importGlobalLocalSkillToCenter(currentTool.key, skill.relative_path);
         toast.success(t("globalWorkspace.localSkills.uploadedToast", { name: skill.name, agent: currentTool.display_name }));
-        await Promise.all([loadLocalSkills(), refreshManagedSkills()]);
+        await Promise.all([loadLocalSkills(true), refreshManagedSkills()]);
       } catch (error: unknown) {
         toast.error(getErrorMessage(error, t("common.error")));
       } finally {
@@ -498,7 +682,7 @@ export function WorkspaceView({ config }: { config: WorkspaceConfig }) {
       try {
         await api.deleteGlobalLocalSkill(currentTool.key, skill.relative_path);
         toast.success(t("globalWorkspace.localSkills.deletedLocalToast", { name: skill.name, agent: currentTool.display_name }));
-        await loadLocalSkills();
+        await loadLocalSkills(true);
       } catch (error: unknown) {
         toast.error(getErrorMessage(error, t("common.error")));
       } finally {
@@ -517,7 +701,7 @@ export function WorkspaceView({ config }: { config: WorkspaceConfig }) {
       try {
         await api.updateGlobalLocalSkillFromCenter(currentTool.key, skill.relative_path);
         toast.success(t("globalWorkspace.localSkills.pulledToast", { name: skill.name, agent: currentTool.display_name }));
-        await loadLocalSkills();
+        await loadLocalSkills(true);
       } catch (error: unknown) {
         toast.error(getErrorMessage(error, t("common.error")));
       } finally {
@@ -534,7 +718,9 @@ export function WorkspaceView({ config }: { config: WorkspaceConfig }) {
       const requestId = localDetailRequestRef.current + 1;
       localDetailRequestRef.current = requestId;
       setLocalDetailSkill(skill);
-      setLocalContentTab("local");
+      // Keep all detail surfaces consistent: AI is the default tab, while
+      // the local document continues loading in the background for fallback.
+      setLocalContentTab("ai");
       setLocalDocContent(null);
       setLocalCenterDocContent(null);
       setLocalDocLoading(true);
@@ -584,7 +770,7 @@ export function WorkspaceView({ config }: { config: WorkspaceConfig }) {
   }, []);
 
   const handlePresetComplete = useCallback(async () => {
-    await Promise.all([refreshManagedSkills(), refreshTools(), loadLocalSkills()]);
+    await Promise.all([refreshManagedSkills(), refreshTools(), loadLocalSkills(true)]);
   }, [loadLocalSkills, refreshManagedSkills, refreshTools]);
 
   const renderLocalSkillActions = (skill: ProjectSkill, variant: "grid" | "list") => {
@@ -798,12 +984,12 @@ export function WorkspaceView({ config }: { config: WorkspaceConfig }) {
 
             <div className="app-segmented shrink-0">
               <button
-                onClick={() => void loadLocalSkills()}
-                disabled={localSkillsLoading}
+                onClick={() => void loadLocalSkills(true)}
+                disabled={localSkillsLoading || localSkillsRefreshing}
                 className="rounded-md p-2 text-muted transition-colors outline-none hover:text-tertiary disabled:opacity-50"
                 title={t("settings.refresh")}
               >
-                <RefreshCw className={cn("h-4 w-4", localSkillsLoading && "animate-spin")} />
+                <RefreshCw className={cn("h-4 w-4", (localSkillsLoading || localSkillsRefreshing) && "animate-spin")} />
               </button>
               <button
                 onClick={() => setViewMode("grid")}
@@ -948,6 +1134,8 @@ export function WorkspaceView({ config }: { config: WorkspaceConfig }) {
           {visibleLocalSkills.map((skill) => {
             const statusMeta = getLocalStatusMeta(t, skill.sync_status);
             const isManaged = !!skill.center_skill_id && managedLocalIds.has(skill.center_skill_id);
+            const aiSummary = localAiSummaries[skill.relative_path];
+            const aiStatus = aiSummary?.status ?? "unparsed";
 
             return (
               <WorkspaceSkillCard
@@ -957,6 +1145,8 @@ export function WorkspaceView({ config }: { config: WorkspaceConfig }) {
                 description={skill.description || skill.relative_path}
                 tags={skill.tags.map((tag) => ({ label: tag, className: getTagColor(tag, allLocalTags) }))}
                 status={statusMeta}
+                aiStatus={aiStatus}
+                aiSummary={aiSummary}
                 fileCount={skill.files.length}
                 active={isManaged}
                 actions={renderLocalSkillActions(skill, viewMode)}
@@ -1033,11 +1223,7 @@ export function WorkspaceView({ config }: { config: WorkspaceConfig }) {
 
         {localContentTab === "ai" && localDetailSkill ? (
           <AiAnalysisPanel
-            target={{
-              kind: "global_local",
-              agent_key: localDetailSkill.agent,
-              relative_path: localDetailSkill.relative_path,
-            }}
+            target={globalSkillAiTarget(localDetailSkill, currentTool.key)}
           />
         ) : localDocLoading ? (
           <div className="mt-12 text-center text-[13px] text-muted">{t("common.loading")}</div>
