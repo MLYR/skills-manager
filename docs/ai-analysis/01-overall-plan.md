@@ -179,7 +179,7 @@ Token仅作估算：单个Job的预计输入Token=`CJK字符数 + ceil(非CJK Un
 
 ## 13. 阶段0冻结契约（Schema v1 / 数据库v8）
 
-本节是第一版实现的冻结契约。后续阶段不得自行改变目标身份、Schema、数据库状态或公开DTO；发现现有代码无法满足时，先在`03-progress.md`登记差异并由主会话裁决。旧sol-advisor Reviewer路由门禁已由用户取消，冻结验收改为全新Codex原生Reviewer行为只读审查及审查前后工作树一致性检查。
+本节是第一版实现的冻结契约。后续阶段不得自行改变目标身份、Schema、数据库状态或公开DTO；发现现有代码无法满足时，先在`03-progress.md`登记差异并由主会话裁决。旧sol-advisor Reviewer路由门禁已由用户取消；审查不强制使用子代理，可由全新只读子代理或主会话自审完成，均需记录审查方式、证据及审查前后工作树一致性。
 
 ### 13.1 目标身份与主文档
 
@@ -416,12 +416,14 @@ clear_ai_analysis_logs() -> { deleted_count }
 
 ### 13.8 精确文件所有权
 
-阶段1 Rust数据Agent独占：`src-tauri/src/core/migrations.rs`、`src-tauri/src/core/skill_store.rs`、`src-tauri/src/core/ai/{mod,types,repository}.rs`、`src-tauri/src/core/mod.rs`；完成可编译的数据模块后交接。随后Rust服务Agent独占接管`src-tauri/src/core/ai/mod.rs`并新增`src-tauri/src/core/ai/{config,secret_store,provider,logs}.rs`，同时独占`src-tauri/src/commands/ai.rs`、`src-tauri/src/commands/mod.rs`、`src-tauri/src/lib.rs`，由它在新文件存在后串行完成模块声明和Command接线。阶段1 React Agent在后端DTO冻结实现后独占：`src/lib/tauri.ts`、`src/lib/error.ts`、`src/components/ai/AiSettingsSection.tsx`、`src/views/Settings.tsx`、`src/i18n/{zh,en,zh-TW}.json`。
+所有权只约束“同一文件同一时间只有一个实际写入者”，不要求使用子代理：主会话可直接实现，也可按需委派子代理；下文中的“实现Agent”均指实际执行者。
 
-阶段2由阶段1数据Agent先完成交接，随后Rust服务Agent独占：`src-tauri/Cargo.toml`及必要时由同一feature变化生成的`src-tauri/Cargo.lock`（仅为现有reqwest启用有界流读取feature，不引入未批准的新Provider依赖）、`src-tauri/src/core/ai/{mod,repository,document,prompt,schema,service,preview,runner}.rs`、`src-tauri/src/commands/ai.rs`、`src-tauri/src/commands/mod.rs`、`src-tauri/src/lib.rs`及同目录定向测试。阶段2实现能创建/领取Job、重试、恢复和提交多表事务的Repository接口，形成真实单个解析闭环；阶段4只扩展并发批量控制、批次操作和管理查询。阶段2 React Agent在后端交接后独占`src/lib/tauri.ts`，只增加协议包装，不接详情UI。
+阶段1 Rust数据实现者（主会话或子代理）独占：`src-tauri/src/core/migrations.rs`、`src-tauri/src/core/skill_store.rs`、`src-tauri/src/core/ai/{mod,types,repository}.rs`、`src-tauri/src/core/mod.rs`；完成可编译的数据模块后交接。随后Rust服务实现者独占接管`src-tauri/src/core/ai/mod.rs`并新增`src-tauri/src/core/ai/{config,secret_store,provider,logs}.rs`，同时独占`src-tauri/src/commands/ai.rs`、`src-tauri/src/commands/mod.rs`、`src-tauri/src/lib.rs`，由它在新文件存在后串行完成模块声明和Command接线。阶段1 React实现者在后端DTO冻结实现后独占：`src/lib/tauri.ts`、`src/lib/error.ts`、`src/components/ai/AiSettingsSection.tsx`、`src/views/Settings.tsx`、`src/i18n/{zh,en,zh-TW}.json`。
 
-阶段3 React Agent独占：`src/components/ai/{AiAnalysisPanel,AiAnalysisPreviewDialog,AiSummaryText}.tsx`、`src/components/SkillDetailPanel.tsx`、`src/views/{MySkills,WorkspaceView,ProjectDetail}.tsx`、`src/lib/tauri.ts`、`src/i18n/{zh,en,zh-TW}.json`。
+阶段2由阶段1数据实现者先完成交接，随后Rust服务实现者独占：`src-tauri/Cargo.toml`及必要时由同一feature变化生成的`src-tauri/Cargo.lock`（仅为现有reqwest启用有界流读取feature，不引入未批准的新Provider依赖）、`src-tauri/src/core/ai/{mod,repository,document,prompt,schema,service,preview,runner}.rs`、`src-tauri/src/commands/ai.rs`、`src-tauri/src/commands/mod.rs`、`src-tauri/src/lib.rs`及同目录定向测试。阶段2实现能创建/领取Job、重试、恢复和提交多表事务的Repository接口，形成真实单个解析闭环；阶段4只扩展并发批量控制、批次操作和管理查询。阶段2 React实现者在后端交接后独占`src/lib/tauri.ts`，只增加协议包装，不接详情UI。
 
-阶段4 Rust服务Agent独占：`src-tauri/src/core/ai/runner.rs`、`src-tauri/src/core/ai/repository.rs`、`src-tauri/src/commands/ai.rs`、`src-tauri/src/lib.rs`，只扩展批量并发、暂停/继续/取消、单项重试和管理查询，不重写阶段2单任务执行器。交接后React Agent独占：`src/views/AiAnalysisManager.tsx`、`src/App.tsx`、`src/components/Sidebar.tsx`、`src/lib/tauri.ts`、`src/i18n/{zh,en,zh-TW}.json`及批量预览组件。
+阶段3 React实现者独占：`src/components/ai/{AiAnalysisPanel,AiAnalysisPreviewDialog,AiSummaryText}.tsx`、`src/components/SkillDetailPanel.tsx`、`src/views/{MySkills,WorkspaceView,ProjectDetail}.tsx`、`src/lib/tauri.ts`、`src/i18n/{zh,en,zh-TW}.json`。
 
-阶段5先由Rust服务Agent独占`src-tauri/src/core/ai/logs.rs`、`src-tauri/src/commands/ai.rs`、`src-tauri/src/lib.rs`及后端测试；交接后React Agent独占`src/views/AiAnalysisManager.tsx`、`src/lib/tauri.ts`、`src/i18n/{zh,en,zh-TW}.json`及前端测试。`docs/ai-analysis/03-progress.md`始终只由主会话修改；所有共享文件始终串行且每次只指定一个所有者。
+阶段4 Rust服务实现者独占：`src-tauri/src/core/ai/runner.rs`、`src-tauri/src/core/ai/repository.rs`、`src-tauri/src/commands/ai.rs`、`src-tauri/src/lib.rs`，只扩展批量并发、暂停/继续/取消、单项重试和管理查询，不重写阶段2单任务执行器。交接后React实现者独占：`src/views/AiAnalysisManager.tsx`、`src/App.tsx`、`src/components/Sidebar.tsx`、`src/lib/tauri.ts`、`src/i18n/{zh,en,zh-TW}.json`及批量预览组件。
+
+阶段5先由Rust服务实现者独占`src-tauri/src/core/ai/logs.rs`、`src-tauri/src/commands/ai.rs`、`src-tauri/src/lib.rs`及后端测试；交接后React实现者独占`src/views/AiAnalysisManager.tsx`、`src/lib/tauri.ts`、`src/i18n/{zh,en,zh-TW}.json`及前端测试。`docs/ai-analysis/03-progress.md`始终只由主会话修改；所有共享文件始终串行且每次只指定一个所有者。

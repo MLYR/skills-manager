@@ -27,6 +27,7 @@ import { SkillMarkdown } from "./SkillMarkdown";
 import { AgentToggleSection, type AgentToggleItem } from "./AgentToggleSection";
 import { SkillProjectsSection } from "./SkillProjectsSection";
 import { SyncDots } from "./SyncDots";
+import { AiAnalysisPanel } from "./ai/AiAnalysisPanel";
 
 interface Props {
   skill: ManagedSkill | null;
@@ -101,7 +102,7 @@ function SkillDetailPanelContent({
   const [sourceDiffFailed, setSourceDiffFailed] = useState(false);
   const [loading, setLoading] = useState(true);
   const [isMetadataExpanded, setIsMetadataExpanded] = useState(false);
-  const [contentTab, setContentTab] = useState<"local" | "diff" | "source">("local");
+  const [contentTab, setContentTab] = useState<"ai" | "local" | "diff" | "source">("ai");
   const localRequestIdRef = useRef(0);
   const sourceRequestIdRef = useRef(0);
   const diffRequestedRef = useRef(false);
@@ -328,9 +329,11 @@ function SkillDetailPanelContent({
         />
       )}
 
-      {supportsSourceDiff && (
-        <div className="mb-4 flex flex-wrap items-center gap-2">
-          {(["local", "diff", "source"] as const).map((tab) => (
+      <div className="mb-4 flex flex-wrap items-center gap-2">
+        {(supportsSourceDiff
+          ? (["ai", "local", "diff", "source"] as const)
+          : (["ai", "local"] as const)
+        ).map((tab) => (
             <button
               key={tab}
               type="button"
@@ -343,22 +346,25 @@ function SkillDetailPanelContent({
               )}
               disabled={tab === "source" && sourceLoading}
             >
-              {tab === "local"
-                ? t("mySkills.docTabs.local")
-                : tab === "diff"
-                  ? t("mySkills.docTabs.diff")
-                  : t("mySkills.docTabs.source")}
+              {tab === "ai"
+                ? t("ai.tab")
+                : tab === "local"
+                  ? t("mySkills.docTabs.local")
+                  : tab === "diff"
+                    ? t("mySkills.docTabs.diff")
+                    : t("mySkills.docTabs.source")}
             </button>
-          ))}
-          {activeSourceDoc && (
-            <span className="rounded-full border border-border-subtle bg-surface px-2 py-1 text-[12px] text-muted">
-              {activeSourceDoc.source_label} · {activeSourceDoc.revision.slice(0, 7)}
-            </span>
-          )}
-        </div>
-      )}
+        ))}
+        {activeSourceDoc && (
+          <span className="rounded-full border border-border-subtle bg-surface px-2 py-1 text-[12px] text-muted">
+            {activeSourceDoc.source_label} · {activeSourceDoc.revision.slice(0, 7)}
+          </span>
+        )}
+      </div>
 
-      {loading ? (
+      {contentTab === "ai" ? (
+        <AiAnalysisPanel target={{ kind: "managed", skill_id: skill.id }} />
+      ) : loading ? (
         <div className="mt-12 text-center text-[13px] text-muted">{t("common.loading")}</div>
       ) : contentTab === "diff" ? (
         sourceDiffLoading ? (

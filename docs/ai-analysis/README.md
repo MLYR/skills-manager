@@ -3,7 +3,7 @@
 状态：规划中  
 建立日期：2026-08-02
 
-本目录是 Skills Manager“AI 解读”功能的唯一规划入口，用于约束后续 AI Agent 的设计、开发、交接和验收。
+本目录是 Skills Manager“AI 解读”功能的唯一规划入口，用于约束后续开发（主会话或委派子代理均可）的设计、开发、交接和验收。
 
 仓库级强制规则位于根目录 [`AGENTS.md`](../../AGENTS.md)。本目录文档负责补充 AI 解读功能的产品、技术和协作细则。
 
@@ -14,7 +14,7 @@
 | [01-overall-plan.md](./01-overall-plan.md) | 产品范围、总体架构、数据模型、页面与接口方案 |
 | [02-development-process.md](./02-development-process.md) | 开发顺序、运行流程、阶段验收和异常处理流程 |
 | [03-progress.md](./03-progress.md) | 当前进度、阶段权重、交付物、阻塞项和变更记录 |
-| [04-agent-rules.md](./04-agent-rules.md) | Agent 角色、文件所有权、协作规则和交接标准 |
+| [04-agent-rules.md](./04-agent-rules.md) | 职责、文件所有权、协作规则和交接标准 |
 
 ## 已确认的产品决策
 
@@ -31,7 +31,7 @@
 
 ## 使用方式
 
-- 开发开始前，所有 Agent 必须先读完本目录四份文档和仓库根目录 `AGENTS.md`。
+- 开发开始前，所有执行者（主会话或委派子代理）必须先读完本目录四份文档和仓库根目录 `AGENTS.md`。
 - 产品方案变化时，先更新 `01-overall-plan.md`，再修改代码。
 - 每完成一个验收门，立即更新 `03-progress.md`，不得凭主观估计填写进度。
-- Agent 的文件边界、验证和交接以 `04-agent-rules.md` 为准。
+- 文件边界、验证和交接以 `04-agent-rules.md` 为准；不强制使用子代理。

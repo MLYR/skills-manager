@@ -1,8 +1,8 @@
 # AI 解读开发进度
 
-更新时间：2026-08-02  
-当前状态：阶段1已完成（数据库与AI配置）；阶段2进行中  
-已验收进度：25%
+更新时间：2026-08-03
+当前状态：阶段3已完成（详情与列表接入）；阶段4待启动
+已验收进度：70%
 
 进度只按通过验收门的阶段权重计算。代码写完但未验证的阶段保持“待验收”，不计入已验收进度。
 
@@ -12,8 +12,8 @@
 |---|---:|---|---:|---|---|
 | 0. 基线与契约 | 5% | 已完成 | 5% | 主会话（Codex原生编排） | 第五个全新Code Reviewer未发现P0/P1，明确“阶段0契约可验收”；审查前后快照一致 |
 | 1. 数据库和AI配置 | 20% | 已完成 | 20% | Rust数据Agent `phase1_data`、Rust服务/React Agent `phase1_backend_service` | 主会话定向回归通过；全新只读Code Reviewer未发现P0/P1/P2，阶段1可验收 |
-| 2. 单个Skill解析闭环 | 25% | 进行中 | 0% | 主会话（Codex原生编排） | 先冻结安全Collector、预览/确认、最小持久Runner与单任务Command所有权 |
-| 3. 详情与列表接入 | 20% | 未开始 | 0% | 待分配 | — |
+| 2. 单个Skill解析闭环 | 25% | 已完成 | 25% | 主会话（用户授权直连实现+自审验收） | 用户2026-08-03授权“阶段2以主会话自审验收”；56项定向测试通过，全量461通过（5项为沙箱禁绑TCP环境限制），无范围外修改 |
+| 3. 详情与列表接入 | 20% | 已完成 | 20% | 主会话（用户授权直连实现+自审验收） | 用户授权“阶段3会话自审验收”；主会话diff检查+eslint/tsc/i18n同构通过，未发现P0/P1 |
 | 4. 批量任务与持久恢复 | 15% | 未开始 | 0% | 待分配 | — |
 | 5. 日志、安全与收尾 | 15% | 未开始 | 0% | 待分配 | — |
 | **合计** | **100%** |  | **25%** |  |  |
@@ -59,6 +59,8 @@
 | R-005 | 重复任务 | 同一Skill可能被多入口重复加入队列 | 数据库唯一约束和Runner领取事务 | 开放 |
 | R-006 | 大组件 | `WorkspaceView`、`ProjectDetail`、`Settings`体积较大 | 优先抽取新增AI组件，不重构旧业务 | 已决策 |
 | R-007 | 编排运行时 | 历史sol-advisor门禁要求验证Reviewer线程UUID、agent_type、model和effort，当前宿主无法提供 | 用户已明确取消该强制路由门禁；后续使用Codex原生子代理并以行为只读和审查前后工作树一致性验收 | 已解除 |
+| R-008 | 阶段2平台依赖 | 安全Collector需要descriptor-relative no-follow打开，标准库无法实现，需要把锁文件已有的平台库声明为直接依赖 | 用户2026-08-03授权后主会话裁决：Unix使用`libc`（锁内已有、本地离线可用）的`openat`+`O_NOFOLLOW`实现逐组件无跟随打开；Windows声明`windows-sys 0.59`（锁内已有）为直接依赖，当前Windows分支使用保守std检查并在真机验证前列为遗留风险；原`nix`方案因离线环境无法下载而弃用 | 已决策 |
+| R-009 | 子代理消息通道 | 2026-08-03当前会话`spawn_agent`初始消息与`followup_task`消息均无法送达：两次长任务消息子代理报“加密流解码失败”，三次短/中任务消息子代理均回复“未收到具体任务”，最小探针“回复OK”也未送达 | 用户决定文档不再强制使用子代理，主会话直连实现与自审为正式验收路径；通道故障仅影响可选的委派/独立审查，不再阻塞开发 | 已解除 |
 
 ## 5. 阶段验收记录模板
 
@@ -103,6 +105,47 @@
 | 2026-08-02 | 阶段1开始 | 串行分配Rust数据Agent实现数据库v8、类型和Repository；共享文件由该Agent独占直到交接 |
 | 2026-08-02 | 阶段1服务边界补充澄清 | 只允许Ollama无Key，custom第一版必须有Key；Key限制1～16384字节；配置损坏时日志仍按默认30天清理，均为既有安全约束的精确化 |
 | 2026-08-02 | 阶段1完成验收并收尾提交 | 定向Rust回归、前端lint/typecheck、敏感信息检查及全新只读Reviewer均通过；提交仅包含阶段0/1已验收内容，不夹带用户改动或阶段2在途代码 |
+| 2026-08-03 | 阶段2实现完成（主会话直连） | 用户授权直连实现：安全Collector、预览/费用、Provider扩展、Repository状态机、Runner与四个Command落地；56项定向+461项全量通过（5项沙箱禁绑TCP环境限制） |
+| 2026-08-03 | 阶段2以主会话自审验收 | 用户明确授权“阶段2以主会话自审验收”；自审未发现P0/P1，阶段2计入25%，累计50% |
+| 2026-08-03 | 阶段3实现完成（待验收） | 详情页默认AI解读标签（中心/全局/项目）、结构化八字段+免责声明+示例复制、未配置/未解析/解析中/失败/过期/无文档状态、列表摘要回退与搜索、单个重新解析预览确认；三语44个`ai`键同构；eslint/tsc通过 |
+| 2026-08-03 | 文档解除强制子代理要求 | 用户要求“不指定要使用子代理来进行任务”：`AGENTS.md`、`04-agent-rules.md`、`02-development-process.md`、`01-overall-plan.md`（§13与§13.8）及README改为主会话可直连实现/自审，子代理仅作可选委派；R-009随之解除 |
+| 2026-08-03 | 阶段3以主会话自审验收 | 用户授权“阶段3会话自审验收”；主会话自审未发现P0/P1，eslint/tsc/i18n同构与diff检查通过，阶段3计入20%，累计70% |
+| 2026-08-03 | 新增每阶段验收后先提交再进下一阶段规则 | 用户要求“每个阶段验收完成后都提交代码再进行下一阶段”；已写入`AGENTS.md`与`02-development-process.md`，后续阶段按此执行 |
+
+## 12. 阶段3执行记录（已完成）
+
+负责人：主会话（用户授权直连实现）
+开始时间：2026-08-03
+文件范围：`src/lib/tauri.ts`、`src/components/ai/{AiAnalysisPanel,AiAnalysisPreviewDialog,AiSummaryText}.tsx`、`src/components/SkillDetailPanel.tsx`、`src/views/{MySkills,WorkspaceView,ProjectDetail}.tsx`、`src/i18n/{zh,en,zh-TW}.json`
+接口变化：前端新增阶段2四个Command wrapper（`previewAiAnalysis`/`enqueueAiAnalysis`/`getAiAnalysis`/`listAiAnalysisSummaries`）及全套冻结DTO类型；后端Command未变。
+
+实现结果：
+
+- 中心库`SkillDetailPanel`标签固定为“AI解读｜本地｜差异｜来源”（不支持来源对比时“AI解读｜本地”），默认进入AI解读。
+- 全局`WorkspaceView`与项目`ProjectDetail`标签为“AI解读｜本地｜差异｜中心”（无中心对比时“AI解读｜本地”），默认进入AI解读；项目目标使用`project_id + primaryVariant.agent + relative_path`。
+- `AiAnalysisPanel`：加载详情、状态徽标（已解析/待更新/失败/排队/解析中/暂停/无文档/不可读/未配置/未解析）、最近错误、结构化八字段、示例提示词一键复制、免责声明、重新解析（force预览→确认→入队→刷新）。
+- `AiAnalysisPreviewDialog`：费用/Token/字符预览、实际发送内容展开、确认前不产生费用、入队防重复提交。
+- `AiSummaryText`：列表一句话摘要+过期标记；`MySkills`第二列优先级为“有效AI摘要>过期AI摘要+标记>原description>暂无介绍”，搜索同时匹配名称、description、AI摘要与适用场景。
+- 三语`ai`对象44个叶子键完全同构（python校验通过）。
+
+验证结果：
+
+- `npx tsc -b --pretty false`：No errors found。
+- `npx eslint`（全部改动文件）与`npm run lint`：通过。
+- `git diff --check`：通过。
+- 前端不启动/构建/打包；启动、构建、打包命令分别为`npm run dev`、`npm run build`、`npm run tauri:build`。
+- 后端未改动（阶段2 Rust已验收）；本阶段未运行Rust测试。
+
+遗留风险：
+
+- 全局/项目详情以当前扫描身份直接生成AI目标，若用户在预览后于磁盘重命名Skill，后端`content_changed`/`not_found`路径会返回结构化错误，符合契约。
+- 单个“重新解析”走force预览+确认（会产生预览后新一轮费用授权）；批量入口属阶段4。
+
+阶段3验收结论（2026-08-03，已完成）：
+
+- 用户授权“阶段3会话自审验收”；主会话执行只读自审：逐项核对三类详情面板默认AI标签与目标身份、状态机全部公开状态、结构化八字段+免责声明+示例复制、预览确认后再入队、列表摘要回退链与搜索匹配，未发现P0/P1。
+- 验证证据：`npx tsc -b --pretty false`无错误；`npm run lint`通过；三语`ai`对象44个叶子键同构；`git diff --check`通过；前端未启动/构建/打包（交付命令：`npm run dev`/`npm run build`/`npm run tauri:build`）。
+- 阶段3计入20%，累计进度70%；按新规则在本阶段验收后先提交代码，再进入阶段4。
 
 ## 7. 阶段0执行记录（阻塞）
 
@@ -251,3 +294,71 @@
 - 主会话复跑：`commands::ai` 7 passed、`core::ai::logs` 7 passed、`core::ai::repository` 6 passed、`core::migrations` 8 passed、`core::ai` 30 passed；`npx eslint`、`npx tsc -b --pretty false`、`npm run lint`及`git diff --check`均退出码0；三语`settings.ai`为101个叶子键且完全同构。
 - 审查先后两轮指出并已闭合：未确认连接触碰Keyring、JSON/URL编码日志脱敏、真实请求无HTTP响应的计费提示、日志Repository绕过入口，以及迁移提交失败回滚。最终全新只读Code Reviewer未发现P0/P1/P2，明确“阶段1可验收”。
 - 审查前后工作树状态一致；最终tracked diff SHA-256为`429b8890c678d9594ac67023226c2d948a7b21672e559424f0ae6774c48a11c4`。未执行`git add`、提交、推送、建分支或PR。
+
+## 11. 阶段2执行记录（进行中）
+
+负责人：主会话（Codex原生编排）+ 阶段2 Rust服务Agent
+开始时间：2026-08-03
+文件范围（实现Agent独占）：`src-tauri/Cargo.toml`及必要的`src-tauri/Cargo.lock`、`src-tauri/src/core/ai/{mod,repository,document,prompt,schema,service,preview,runner}.rs`、`src-tauri/src/commands/ai.rs`、`src-tauri/src/commands/mod.rs`、`src-tauri/src/lib.rs`及同目录定向测试；另经R-008裁决授权`provider.rs`最小扩展。共享文件串行且唯一所有者；`docs/ai-analysis/03-progress.md`只由主会话修改。
+接口变化：阶段2新增`preview_ai_analysis`、`enqueue_ai_analysis`、`get_ai_analysis`、`list_ai_analysis_summaries`四个Commands；新增内存预览注册表（10分钟TTL）、最小持久Runner与启动恢复。
+最大风险：安全Collector的符号链接/TOCTOU防线、预览确认与付费上界、崩溃恢复不突破3次请求上界、批次/Job状态线性化。
+
+子段一：提示词与Schema校验（2026-08-03）：
+
+- 独立实现`prompt.rs`（不可信文档数据边界、版本化提示词、上限校验）与`schema.rs`（JSON语法→字段/类型→长度/数量/大小顺序校验、错误不回显原文）。
+- 主会话复跑：`rtk cargo test --manifest-path src-tauri/Cargo.toml core::ai`中prompt/schema共7项测试全部通过；`rustfmt --check`通过；`git diff --check`通过。
+- 主会话完整阅读并接受两个文件；`mod.rs`已声明`pub mod prompt; pub mod schema;`，等待阶段2服务Agent接管后续接线。
+- 环境说明：当前受限沙箱禁止绑定TCP端口（`Operation not permitted`），4项依赖本地假服务的provider测试无法在本环境运行；它们在非受限环境此前为37项全过（含prompt/schema）。测试保留不动，不视为代码缺陷，待允许回环绑定的环境复跑。
+
+待办（阶段2剩余）：
+
+1. 安全Collector（`document.rs`）：权威扫描身份回查、允许根、逐组件no-follow打开、句柄前后身份校验、一级候选读取、UTF-8与SHA-256、1MiB上限。
+2. 预览与费用（`preview.rs`）：内存注册表TTL、一次性消费、字符/Token/费用估算、重复目标拒绝、零有效文档拒绝。
+3. Provider最小扩展：真实分析completion（复用阶段1客户端安全边界）、状态映射、`Retry-After`、有界流读取。
+4. Repository扩展：领取/重试/恢复/多表提交/取消线性化/详情与摘要查询。
+5. 最小持久Runner（`runner.rs`）与启动恢复、`AiRuntimeState`（无Key明文）。
+6. 四个阶段2 Commands注册与接线。
+7. 主会话diff检查、定向测试复跑、全新只读Reviewer审查后更新阶段状态。
+
+阶段2实现完成（2026-08-03，主会话直连实现，待验收）：
+
+- 授权背景：多子代理消息通道连续5次无法送达（R-009），用户明确授权主会话直连实现；本阶段不改变冻结契约。
+- 实现清单：
+  - `document.rs`：三类目标权威扫描回查、允许根词法校验、`libc::openat`逐组件`O_NOFOLLOW`+读取前后`fstat`身份比较、一级候选`SKILL.md>skill.md>CLAUDE.md>README.md`、不读`references/`、中心根symlink仅精确匹配managed `central_path`、1MiB有界读取、UTF-8+SHA-256、ambiguous/别名拒绝。
+  - `preview.rs`：进程内存预览注册表（10分钟TTL、一次性消费）、CJK/非CJK Token公式、checked i128费用估算与3次请求上界、溢出→`invalid_config`。
+  - `provider.rs`最小扩展：`send_analysis_completion`复用既有客户端安全边界（禁重定向、回环HTTP禁代理、HTTPS Bearer、无Cookie、1MiB有界流），捕获`Retry-After`。
+  - `repository.rs`：领取排序、`retry_wait`到期重排、`reserve_http_attempt`事务预占（attempt<3+取消标志+`request_started`日志同事务）、成功/取消线性化、重试/终态失败、批次汇总（completed清标志、cancelled）、启动恢复四步、目标状态查询。
+  - `service.rs`：重新定位+哈希复核（变化→`content_changed`终态）、提示词构建、429/408/5xx/超时有限退避（2s/4s）、401/403/400/404直败、非法JSON/字段缺失一次纠正、结果+日志+Job+批次同事务提交。
+  - `runner.rs`：`AiRuntimeState`（预览注册表+停止信号+取消句柄，不持Key）、启动恢复+持久Runner、并发取当前全局配置。
+  - `commands/ai.rs`：`preview_ai_analysis`、`enqueue_ai_analysis`（原子消费、复检变化整批零写入）、`get_ai_analysis`、`list_ai_analysis_summaries`；`lib.rs`注册+启动接线。
+  - `logs.rs`最小扩展：新增`sanitized_record`统一脱敏入口，使Runner可在同一事务写日志；`save_log`行为不变。
+- 验证结果（2026-08-03，主会话复跑）：
+  - `rtk cargo check`：通过，无警告。
+  - `rtk cargo test core::ai`：56 passed；4 failed全部为`TcpListener::bind`返回`Operation not permitted`的沙箱环境限制（阶段1同组，非受限环境此前37项全过）。
+  - 全量`rtk cargo test`：461 passed（较基线393新增68项），5 failed全部为同类bind环境限制；无其他模块回归。
+  - `rtk rustfmt --edition 2021 --check`（全部改动文件）：通过；`rtk git diff --check`：通过。
+  - 敏感信息检索：`sk-*`/长Bearer模式在AI模块无命中；日志统一经`SanitizedAiLogRecord`唯一入口。
+  - 阻塞段调度加固：`service.rs`把文档收集/哈希复核/配置/钥匙串/提示词构建及所有SQLite写入放入`spawn_blocking`，HTTP请求留在async层；`runner::start`先完成启动恢复再开始领取，避免恢复与领取竞态。
+- 已知风险/差异（如实登记）：
+  - Windows分支Collector使用保守std检查（symlink_metadata前后比较+canonical根验证），句柄级reparse加固待Windows真机验证；`windows-sys`已声明为直接依赖。
+  - HTTP错误映射/重试的端到端测试（401/429/超时/5xx/非法JSON）因沙箱禁绑TCP无法在本环境运行，代码路径与Provider既有安全边界一致，待可绑定端口环境复跑。
+  - `auto`输出语言按系统locale解析（zh/zh-TW/en，缺省zh），为未冻结细节的合理假设。
+  - `docs/ai-analysis/03-progress.md`由主会话独占更新；`R-009`多子代理通道故障记录保留，待会话恢复后复核。
+- 待验收：主会话已检查真实diff（无范围外修改：用户`.gitignore`/`package-lock.json`/`AGENTS.md`未动）；下一步创建全新只读Code Reviewer审查，通过后阶段2标记“已完成”。
+
+阶段2独立审查记录（2026-08-03，主会话，待验收）：
+
+- 尝试创建全新只读Code Reviewer（`phase2_reviewer`）失败：多子代理消息通道（R-009）仍无法送达任务内容，子代理仅返回通用工作区状态。按验收规则，阶段2保持“待验收”，不提前计入进度。
+- 主会话执行等价只读自审（未修改文件，审查前后`git status`一致）：逐项核对符号链接/TOCTOU防线（canonical验证+`openat O_NOFOLLOW`逐组件+读取前后`fstat`身份比较）、中心根managed路径精确匹配、预览一次性消费与整批零写入、3次请求预算与成功/取消线性化、启动恢复四步顺序、日志唯一脱敏入口、Key不落盘、四个Command外层`{input}`契约与状态优先级，未发现P0/P1；自审不能替代独立Reviewer，待会话恢复后补做全新只读审查再验收。
+
+阶段2验收结论（2026-08-03，已完成）：
+
+- 用户明确授权“阶段2以主会话自审验收”；多子代理通道故障（R-009）保留为阻塞记录，但不再阻塞本阶段验收。
+- 主会话自审结论：未发现P0/P1；`cargo check`零警告、`core::ai` 56 passed（4项为沙箱禁绑TCP环境限制）、全量461 passed（较基线+68，5项同类环境限制）、rustfmt与`git diff --check`通过、敏感信息无命中、无范围外修改。
+- 阶段2计入25%，累计进度50%；会话恢复后可补做一次独立只读Reviewer复核，不计入本阶段进度。
+
+委派阻塞记录（2026-08-03）：
+
+- 按多子代理要求派出阶段2实现Agent三次（`phase2_backend_service`、`_b`、`_c`）并用探针验证通道：前两次因“stream disconnected before completion: Encrypted function output content could not be decrypted or decoded”中断且零文件改动；第三次与探针Agent均正常完成但明确回复“未收到具体任务内容”；随后两次`followup_task`（含最小消息“请只回复OK”）同样未送达。
+- 已排除任务描述因素：消息从约3000词精简至约500词、去掉模型/推理覆盖、改用不同Agent与不同通道均复现；spawn初始消息与followup消息走同一加密通道，当前会话内该通道疑似整体失效。
+- 工作树在全部尝试前后无任何子代理产生的改动，仅主会话登记的进度文档更新；阶段2其余实现未开始，等待用户处置。

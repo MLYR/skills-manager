@@ -32,6 +32,7 @@ import { ProjectAgentDots } from "../components/ProjectAgentDots";
 import { PresetBar } from "../components/PresetBar";
 import { SkillMarkdown } from "../components/SkillMarkdown";
 import { DocumentDiffViewer } from "../components/DocumentDiffViewer";
+import { AiAnalysisPanel } from "../components/ai/AiAnalysisPanel";
 import { getTagActiveColor, getTagColor, UNTAGGED_FILTER } from "../lib/skillTags";
 import { cn } from "../utils";
 import * as api from "../lib/tauri";
@@ -1393,6 +1394,7 @@ export function ProjectDetail() {
       {detailSkill && project && (
         <ProjectSkillDetailPanel
           skill={detailSkill}
+          projectId={id ?? ""}
           targets={exportTargets}
           togglingAgent={
             togglingAgentTarget?.skillKey === getSkillKey(detailSkill)
@@ -1462,6 +1464,7 @@ export function ProjectDetail() {
 
 function ProjectSkillDetailPanel({
   skill,
+  projectId,
   targets,
   togglingAgent,
   onToggleAgent,
@@ -1472,6 +1475,7 @@ function ProjectSkillDetailPanel({
   onClose,
 }: {
   skill: ProjectSkillGroup;
+  projectId: string;
   targets: ProjectAgentTarget[];
   togglingAgent: string | null;
   onToggleAgent: (agentKey: string, enabled: boolean) => void;
@@ -1482,7 +1486,7 @@ function ProjectSkillDetailPanel({
   onClose: () => void;
 }) {
   const { t } = useTranslation();
-  const [contentTab, setContentTab] = useState<"local" | "diff" | "center">("local");
+  const [contentTab, setContentTab] = useState<"ai" | "local" | "diff" | "center">("ai");
   const supportsCenterDiff = skill.centerSkillIds.length > 0;
   const toggleItems: AgentToggleItem[] = targets.map((target) => {
     const variant = skill.variants.find((item) => item.agent === target.key);
@@ -1558,9 +1562,11 @@ function ProjectSkillDetailPanel({
         className="mb-4"
       />
 
-      {supportsCenterDiff && (
-        <div className="mb-4 flex flex-wrap items-center gap-2">
-          {(["local", "diff", "center"] as const).map((tab) => (
+      <div className="mb-4 flex flex-wrap items-center gap-2">
+          {(supportsCenterDiff
+            ? (["ai", "local", "diff", "center"] as const)
+            : (["ai", "local"] as const)
+          ).map((tab) => (
             <button
               key={tab}
               type="button"
@@ -1573,17 +1579,27 @@ function ProjectSkillDetailPanel({
               )}
               disabled={(tab === "diff" || tab === "center") && centerDocLoading}
             >
-              {tab === "local"
-                ? t("mySkills.docTabs.local")
-                : tab === "diff"
-                  ? t("mySkills.docTabs.diff")
-                  : t("project.docTabs.center")}
+              {tab === "ai"
+                ? t("ai.tab")
+                : tab === "local"
+                  ? t("mySkills.docTabs.local")
+                  : tab === "diff"
+                    ? t("mySkills.docTabs.diff")
+                    : t("project.docTabs.center")}
             </button>
           ))}
-        </div>
-      )}
+      </div>
 
-      {docLoading ? (
+      {contentTab === "ai" ? (
+        <AiAnalysisPanel
+          target={{
+            kind: "project_local",
+            project_id: projectId,
+            agent_key: skill.primaryVariant.agent,
+            relative_path: skill.primaryVariant.relative_path,
+          }}
+        />
+      ) : docLoading ? (
         <div className="mt-12 text-center text-[13px] text-muted">{t("common.loading")}</div>
       ) : contentTab === "diff" ? (
         docContent && centerDocContent ? (

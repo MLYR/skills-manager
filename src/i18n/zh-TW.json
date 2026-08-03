@@ -221,6 +221,60 @@
     "restoreSuccess": "備份已還原，技能已就緒。",
     "hint": "之後隨時可以在側邊欄的「備份」頁連線或還原備份。"
   },
+  "ai": {
+    "tab": "AI 解讀",
+    "preview": {
+      "title": "AI 解讀預覽",
+      "scope": "共 {{total}} 個目標：{{valid}} 個可解析，{{missing}} 個無文件，{{unreadable}} 個不可讀。",
+      "usage": "總字元 {{characters}}，預計輸入 {{input}} / 輸出 {{output}} Token。",
+      "cost": "預計費用：",
+      "maxCost": "上限（最多3次請求）：",
+      "billingNote": "確認後可能在確認的費用上界內產生模型費用；Token 估算不等於服務商帳單。",
+      "expandContent": "展開實際發送內容",
+      "collapseContent": "收起實際發送內容",
+      "noContent": "（無內容）",
+      "duringConfirmation": "正在建立任務，請稍候…",
+      "confirm": "確認並開始解析",
+      "enqueuing": "正在入隊…",
+      "noPrice": "未設定單價",
+      "currencyUnit": "元",
+      "microUnit": "微元"
+    },
+    "panel": {
+      "enqueued": "AI 解讀任務已建立",
+      "copied": "已複製範例提示詞",
+      "jobAttempt": "嘗試 {{attempt}}/{{total}}",
+      "reanalyze": "重新解析",
+      "noDocument": "該 Skill 目錄沒有可解析的主文件（SKILL.md / skill.md / CLAUDE.md / README.md）。",
+      "unconfigured": "尚未設定 AI 服務；請先在設定頁完成 AI 設定。",
+      "unparsed": "該 Skill 尚未解析。",
+      "stale": "Skill 文件已更新，AI 解讀為舊版本，重新解析後更新。",
+      "whatItDoes": "它能做什麼",
+      "whenToUse": "什麼時候使用",
+      "howToUse": "怎麼使用",
+      "requirements": "需要準備什麼",
+      "notFor": "不適用場景",
+      "warnings": "限制與風險",
+      "examplePrompts": "範例提示詞",
+      "copy": "複製",
+      "disclaimer": "AI 生成，僅供理解參考；請以原始文件為準。"
+    },
+    "status": {
+      "succeeded": "已解析",
+      "stale": "待更新",
+      "failed": "解析失敗",
+      "queued": "排隊中",
+      "running": "解析中",
+      "paused": "已暫停",
+      "noDocument": "無主文件",
+      "unreadable": "不可讀",
+      "unconfigured": "未設定",
+      "unparsed": "未解析"
+    },
+    "list": {
+      "stale": "待更新"
+    }
+  },
   "mySkills": {
     "title": "技能庫",
     "applyToDefault": "套用 Preset",

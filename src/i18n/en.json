@@ -221,6 +221,60 @@
     "restoreSuccess": "Backup restored — your skills are ready.",
     "hint": "You can connect or restore a backup at any time from the Backup page in the sidebar."
   },
+  "ai": {
+    "tab": "AI Summary",
+    "preview": {
+      "title": "AI Analysis Preview",
+      "scope": "{{total}} targets: {{valid}} readable, {{missing}} without a document, {{unreadable}} unreadable.",
+      "usage": "{{characters}} characters total, estimated {{input}} input / {{output}} output tokens.",
+      "cost": "Estimated cost:",
+      "maxCost": "Upper bound (up to 3 requests):",
+      "billingNote": "Confirming may incur model charges within the confirmed upper bound; token estimates are not the provider bill.",
+      "expandContent": "Show actual content to send",
+      "collapseContent": "Hide actual content to send",
+      "noContent": "(no content)",
+      "duringConfirmation": "Creating the task…",
+      "confirm": "Confirm and start analysis",
+      "enqueuing": "Enqueuing…",
+      "noPrice": "No price configured",
+      "currencyUnit": "currency",
+      "microUnit": "micro-units"
+    },
+    "panel": {
+      "enqueued": "AI analysis task created",
+      "copied": "Example prompt copied",
+      "jobAttempt": "Attempt {{attempt}}/{{total}}",
+      "reanalyze": "Re-analyze",
+      "noDocument": "This Skill directory has no analyzable main document (SKILL.md / skill.md / CLAUDE.md / README.md).",
+      "unconfigured": "AI service is not configured yet; finish AI setup in Settings first.",
+      "unparsed": "This Skill has not been analyzed yet.",
+      "stale": "The Skill document changed; this summary is outdated. Re-analyze to refresh it.",
+      "whatItDoes": "What it does",
+      "whenToUse": "When to use",
+      "howToUse": "How to use",
+      "requirements": "Requirements",
+      "notFor": "Not for",
+      "warnings": "Limits and risks",
+      "examplePrompts": "Example prompts",
+      "copy": "Copy",
+      "disclaimer": "AI-generated, for reference only; always check the original document."
+    },
+    "status": {
+      "succeeded": "Analyzed",
+      "stale": "Outdated",
+      "failed": "Failed",
+      "queued": "Queued",
+      "running": "Running",
+      "paused": "Paused",
+      "noDocument": "No document",
+      "unreadable": "Unreadable",
+      "unconfigured": "Not configured",
+      "unparsed": "Not analyzed"
+    },
+    "list": {
+      "stale": "Outdated"
+    }
+  },
   "mySkills": {
     "title": "Library",
     "applyToDefault": "Apply Preset",

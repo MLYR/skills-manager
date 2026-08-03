@@ -25,6 +25,7 @@ import { AgentIcon } from "../components/AgentIcon";
 import { DetailSheet } from "../components/DetailSheet";
 import { SkillMarkdown } from "../components/SkillMarkdown";
 import { DocumentDiffViewer } from "../components/DocumentDiffViewer";
+import { AiAnalysisPanel } from "../components/ai/AiAnalysisPanel";
 import * as api from "../lib/tauri";
 import type { ManagedSkill, ProjectSkill } from "../lib/tauri";
 import { getErrorMessage } from "../lib/error";
@@ -228,7 +229,7 @@ export function WorkspaceView({ config }: { config: WorkspaceConfig }) {
   const [localCenterDocContent, setLocalCenterDocContent] = useState<string | null>(null);
   const [localDocLoading, setLocalDocLoading] = useState(false);
   const [localCenterDocLoading, setLocalCenterDocLoading] = useState(false);
-  const [localContentTab, setLocalContentTab] = useState<"local" | "diff" | "center">("local");
+  const [localContentTab, setLocalContentTab] = useState<"ai" | "local" | "diff" | "center">("ai");
   const [uploadConfirmSkill, setUploadConfirmSkill] = useState<ProjectSkill | null>(null);
   const [pullConfirmSkill, setPullConfirmSkill] = useState<ProjectSkill | null>(null);
   const [deleteLocalConfirmSkill, setDeleteLocalConfirmSkill] = useState<ProjectSkill | null>(null);
@@ -1000,9 +1001,12 @@ export function WorkspaceView({ config }: { config: WorkspaceConfig }) {
         }
         onClose={() => setLocalDetailSkill(null)}
       >
-        {localDetailSkill?.center_skill_id && (
+        {localDetailSkill && (
           <div className="mb-4 flex flex-wrap items-center gap-2">
-            {(["local", "diff", "center"] as const).map((tab) => (
+            {(localDetailSkill.center_skill_id
+              ? (["ai", "local", "diff", "center"] as const)
+              : (["ai", "local"] as const)
+            ).map((tab) => (
               <button
                 key={tab}
                 type="button"
@@ -1015,17 +1019,27 @@ export function WorkspaceView({ config }: { config: WorkspaceConfig }) {
                 )}
                 disabled={(tab === "diff" || tab === "center") && localCenterDocLoading}
               >
-                {tab === "local"
-                  ? t("mySkills.docTabs.local")
-                  : tab === "diff"
-                    ? t("mySkills.docTabs.diff")
-                    : t("project.docTabs.center")}
+                {tab === "ai"
+                  ? t("ai.tab")
+                  : tab === "local"
+                    ? t("mySkills.docTabs.local")
+                    : tab === "diff"
+                      ? t("mySkills.docTabs.diff")
+                      : t("project.docTabs.center")}
               </button>
             ))}
           </div>
         )}
 
-        {localDocLoading ? (
+        {localContentTab === "ai" && localDetailSkill ? (
+          <AiAnalysisPanel
+            target={{
+              kind: "global_local",
+              agent_key: localDetailSkill.agent,
+              relative_path: localDetailSkill.relative_path,
+            }}
+          />
+        ) : localDocLoading ? (
           <div className="mt-12 text-center text-[13px] text-muted">{t("common.loading")}</div>
         ) : localContentTab === "diff" ? (
           localDocContent && localCenterDocContent ? (
@@ -1088,4 +1102,3 @@ export function WorkspaceView({ config }: { config: WorkspaceConfig }) {
     </div>
   );
 }
-

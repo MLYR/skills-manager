@@ -221,6 +221,60 @@
     "restoreSuccess": "备份已恢复，技能已就绪。",
     "hint": "之后随时可以在侧边栏的「备份」页连接或恢复备份。"
   },
+  "ai": {
+    "tab": "AI 解读",
+    "preview": {
+      "title": "AI 解读预览",
+      "scope": "共 {{total}} 个目标：{{valid}} 个可解析，{{missing}} 个无文档，{{unreadable}} 个不可读。",
+      "usage": "总字符 {{characters}}，预计输入 {{input}} / 输出 {{output}} Token。",
+      "cost": "预计费用：",
+      "maxCost": "上限（最多3次请求）：",
+      "billingNote": "确认后可能在确认的费用上界内产生模型费用；Token 估算不等于服务商账单。",
+      "expandContent": "展开实际发送内容",
+      "collapseContent": "收起实际发送内容",
+      "noContent": "（无内容）",
+      "duringConfirmation": "正在创建任务，请稍候…",
+      "confirm": "确认并开始解析",
+      "enqueuing": "正在入队…",
+      "noPrice": "未配置单价",
+      "currencyUnit": "元",
+      "microUnit": "微元"
+    },
+    "panel": {
+      "enqueued": "AI 解读任务已创建",
+      "copied": "已复制示例提示词",
+      "jobAttempt": "尝试 {{attempt}}/{{total}}",
+      "reanalyze": "重新解析",
+      "noDocument": "该 Skill 目录没有可解析的主文档（SKILL.md / skill.md / CLAUDE.md / README.md）。",
+      "unconfigured": "尚未配置 AI 服务；请先在设置页完成 AI 配置。",
+      "unparsed": "该 Skill 尚未解析。",
+      "stale": "Skill 文档已更新，AI 解读为旧版本，重新解析后更新。",
+      "whatItDoes": "它能做什么",
+      "whenToUse": "什么时候使用",
+      "howToUse": "怎么使用",
+      "requirements": "需要准备什么",
+      "notFor": "不适用场景",
+      "warnings": "限制与风险",
+      "examplePrompts": "示例提示词",
+      "copy": "复制",
+      "disclaimer": "AI 生成，仅供理解参考；请以原始文档为准。"
+    },
+    "status": {
+      "succeeded": "已解析",
+      "stale": "待更新",
+      "failed": "解析失败",
+      "queued": "排队中",
+      "running": "解析中",
+      "paused": "已暂停",
+      "noDocument": "无主文档",
+      "unreadable": "不可读",
+      "unconfigured": "未配置",
+      "unparsed": "未解析"
+    },
+    "list": {
+      "stale": "待更新"
+    }
+  },
   "mySkills": {
     "title": "技能库",
     "applyToDefault": "应用 Preset",

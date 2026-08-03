@@ -232,6 +232,177 @@ export interface AiConnectionTestDto {
   billable_request_sent: boolean;
 }
 
+export type AiTargetRef =
+  | { kind: "managed"; skill_id: string }
+  | { kind: "global_local"; agent_key: string; relative_path: string }
+  | { kind: "project_local"; project_id: string; agent_key: string; relative_path: string };
+
+export type AiAnalysisMode = "missing_only" | "stale_only" | "missing_or_stale" | "force";
+
+export type AiPreviewEligibility = "ready" | "no_document" | "unreadable" | "skipped";
+
+export interface AiPreviewItemDto {
+  target: AiTargetRef;
+  skill_name: string;
+  document_filename: string | null;
+  source_hash: string | null;
+  content: string | null;
+  character_count: number;
+  estimated_input_tokens: number;
+  estimated_output_tokens: number;
+  eligibility: AiPreviewEligibility;
+  error_code: string | null;
+}
+
+export interface AiAnalysisPreviewDto {
+  preview_id: string;
+  expires_at: number;
+  mode: AiAnalysisMode;
+  total_targets: number;
+  valid_documents: number;
+  missing_documents: number;
+  unreadable_documents: number;
+  skipped_targets: number;
+  total_characters: number;
+  estimated_input_tokens: number;
+  estimated_output_tokens: number;
+  estimated_cost_micros: number | null;
+  estimated_max_retry_cost_micros: number | null;
+  provider: string;
+  base_url: string;
+  model: string;
+  output_language: string;
+  items: AiPreviewItemDto[];
+}
+
+export type AiAnalysisStatus =
+  | "unconfigured"
+  | "unparsed"
+  | "queued"
+  | "running"
+  | "paused"
+  | "failed"
+  | "succeeded"
+  | "stale"
+  | "no_document"
+  | "unreadable";
+
+export type AiJobStatus =
+  | "queued"
+  | "running"
+  | "retry_wait"
+  | "interrupted"
+  | "succeeded"
+  | "failed"
+  | "cancelled";
+
+export interface AiJobDto {
+  id: string;
+  batch_id: string;
+  ordinal: number;
+  target: AiTargetRef;
+  skill_name: string;
+  status: AiJobStatus;
+  attempt_count: number;
+  manual_retry_count: number;
+  correction_attempted: boolean;
+  cancel_requested: boolean;
+  next_retry_at: number | null;
+  error_code: string | null;
+  error_message: string | null;
+  created_at: number;
+  updated_at: number;
+  started_at: number | null;
+  finished_at: number | null;
+}
+
+export interface AiAnalysisDetailDto {
+  target: AiTargetRef;
+  status: AiAnalysisStatus;
+  skill_name: string | null;
+  source_hash: string | null;
+  current_source_hash: string | null;
+  schema_version: number | null;
+  prompt_version: string | null;
+  output_language: string | null;
+  provider: string | null;
+  model: string | null;
+  one_line: string | null;
+  result: {
+    one_line: string;
+    what_it_does: string;
+    when_to_use: string[];
+    how_to_use: string[];
+    example_prompts: string[];
+    requirements: string[];
+    not_for: string[];
+    warnings: string[];
+  } | null;
+  input_tokens: number | null;
+  output_tokens: number | null;
+  total_tokens: number | null;
+  analyzed_at: number | null;
+  active_job: AiJobDto | null;
+  last_error: {
+    kind: string;
+    code: string;
+    message: string;
+    retryable: boolean;
+    next_retry_at: number | null;
+  } | null;
+}
+
+export interface AiAnalysisSummaryDto {
+  target: AiTargetRef;
+  skill_name: string;
+  status: AiAnalysisStatus;
+  one_line: string | null;
+  when_to_use: string[];
+  source_hash: string | null;
+  is_stale: boolean;
+  updated_at: number | null;
+  active_job_id: string | null;
+  error_code: string | null;
+  error_message: string | null;
+}
+
+export type AiBatchStatus =
+  | "queued"
+  | "running"
+  | "paused"
+  | "cancelling"
+  | "completed"
+  | "cancelled";
+
+export interface AiBatchDto {
+  id: string;
+  status: AiBatchStatus;
+  total_targets: number;
+  valid_documents: number;
+  missing_documents: number;
+  unreadable_documents: number;
+  skipped_targets: number;
+  estimated_input_tokens: number;
+  estimated_output_tokens: number;
+  estimated_cost_micros: number | null;
+  estimated_max_retry_cost_micros: number | null;
+  jobs_queued: number;
+  jobs_running: number;
+  jobs_retry_wait: number;
+  jobs_interrupted: number;
+  jobs_succeeded: number;
+  jobs_failed: number;
+  jobs_cancelled: number;
+  progress_completed: number;
+  progress_total: number;
+  pause_requested: boolean;
+  cancel_requested: boolean;
+  confirmed_at: number;
+  created_at: number;
+  updated_at: number;
+  finished_at: number | null;
+}
+
 // ── Tools ──
 
 export const getToolStatus = () => invoke<ToolInfo[]>("get_tool_status");
@@ -489,6 +660,20 @@ export const deleteAiApiKey = () =>
 
 export const testAiConnection = (input: AiConnectionTestInput) =>
   invoke<AiConnectionTestDto>("test_ai_connection", { input });
+
+export const previewAiAnalysis = (input: {
+  targets: AiTargetRef[];
+  mode: AiAnalysisMode;
+}) => invoke<AiAnalysisPreviewDto>("preview_ai_analysis", { input });
+
+export const enqueueAiAnalysis = (input: { preview_id: string }) =>
+  invoke<AiBatchDto>("enqueue_ai_analysis", { input });
+
+export const getAiAnalysis = (input: { target: AiTargetRef }) =>
+  invoke<AiAnalysisDetailDto>("get_ai_analysis", { input });
+
+export const listAiAnalysisSummaries = (input: { targets: AiTargetRef[] }) =>
+  invoke<AiAnalysisSummaryDto[]>("list_ai_analysis_summaries", { input });
 
 export const appExit = () => invoke<void>("app_exit");
 

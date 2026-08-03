@@ -37,6 +37,7 @@ import { SkillDetailPanel } from "../components/SkillDetailPanel";
 import { MultiSelectToolbar } from "../components/MultiSelectToolbar";
 import { BatchTagDialog } from "../components/BatchTagDialog";
 import { SyncDots } from "../components/SyncDots";
+import { AiSummaryText } from "../components/ai/AiSummaryText";
 import * as api from "../lib/tauri";
 import { getTagActiveColor, getTagColor, UNTAGGED_FILTER } from "../lib/skillTags";
 import type {
@@ -44,6 +45,7 @@ import type {
   ToolInfo,
   GitBackupStatus,
   SkillToolToggle,
+  AiAnalysisSummaryDto,
 } from "../lib/tauri";
 import { getErrorMessage } from "../lib/error";
 import {
@@ -140,6 +142,10 @@ export function MySkills() {
   const [tagToRename, setTagToRename] = useState<string | null>(null);
   const [tagToDelete, setTagToDelete] = useState<string | null>(null);
   const [search, setSearch] = useState("");
+  // AI summaries keyed by managed skill id; only succeeded/stale entries are
+  // shown, everything else falls back to the original description.
+  const [aiSummaries, setAiSummaries] = useState<Record<string, AiAnalysisSummaryDto>>({});
+  const aiSummariesRequestRef = useRef(0);
   const [deletingIds, setDeletingIds] = useState<Set<string>>(new Set());
   const refreshAfterDeleteRef = useRef<number | null>(null);
   const [batchDeleteConfirm, setBatchDeleteConfirm] = useState(false);
@@ -228,13 +234,42 @@ export function MySkills() {
     return displayNames;
   }, [skills]);
 
+  useEffect(() => {
+    aiSummariesRequestRef.current += 1;
+    const requestId = aiSummariesRequestRef.current;
+    const targets = skills.map((skill) => ({ kind: "managed" as const, skill_id: skill.id }));
+    if (targets.length === 0) {
+      setAiSummaries({});
+      return;
+    }
+    api
+      .listAiAnalysisSummaries({ targets })
+      .then((summaries) => {
+        if (requestId !== aiSummariesRequestRef.current) return;
+        const next: Record<string, AiAnalysisSummaryDto> = {};
+        for (const summary of summaries) {
+          if (summary.target.kind === "managed") {
+            next[summary.target.skill_id] = summary;
+          }
+        }
+        setAiSummaries(next);
+      })
+      .catch(() => {
+        if (requestId === aiSummariesRequestRef.current) setAiSummaries({});
+      });
+  }, [skills]);
+
   const filtered = useMemo(() => {
     const result = skills.filter((skill) => {
       const displayName = skillDisplayNames.get(skill.id) || skill.name;
       const matchesSearch =
         skill.name.toLowerCase().includes(search.toLowerCase()) ||
         displayName.toLowerCase().includes(search.toLowerCase()) ||
-        (skill.description || "").toLowerCase().includes(search.toLowerCase());
+        (skill.description || "").toLowerCase().includes(search.toLowerCase()) ||
+        (aiSummaries[skill.id]?.one_line || "").toLowerCase().includes(search.toLowerCase()) ||
+        (aiSummaries[skill.id]?.when_to_use || []).some((item) =>
+          item.toLowerCase().includes(search.toLowerCase())
+        );
       if (!matchesSearch) return false;
 
       if (sourceFilters.size > 0 && !sourceFilters.has(skill.source_type)) return false;
@@ -271,7 +306,15 @@ export function MySkills() {
     }
 
     return result;
-  }, [skills, skillDisplayNames, search, sourceFilters, tagFilters, filterMode, viewedPreset, presetSkillOrder]);
+  }, [skills, skillDisplayNames, aiSummaries, search, sourceFilters, tagFilters, filterMode, viewedPreset, presetSkillOrder]);
+
+  const summaryFor = (skillId: string): AiAnalysisSummaryDto | null => {
+    const summary = aiSummaries[skillId];
+    if (!summary) return null;
+    // Only fresh or stale summaries replace the description; queued/running/
+    // failed/unconfigured states keep the original text.
+    return summary.status === "succeeded" || summary.status === "stale" ? summary : null;
+  };
 
   const {
     isMultiSelect, setIsMultiSelect,
@@ -1246,9 +1289,20 @@ export function MySkills() {
                   </div>
 
                   <div className="px-3.5 pb-3">
-                    <p className="text-[13px] leading-[18px] text-muted truncate">
-                      {skill.description || "—"}
-                    </p>
+                    {(() => {
+                      const summary = summaryFor(skill.id);
+                      return summary ? (
+                        <AiSummaryText
+                          oneLine={summary.one_line}
+                          stale={summary.is_stale}
+                          className="text-[13px] leading-[18px] text-muted"
+                        />
+                      ) : (
+                        <p className="text-[13px] leading-[18px] text-muted truncate">
+                          {skill.description || "—"}
+                        </p>
+                      );
+                    })()}
                     {(badge || conflictIds.has(skill.id)) && (
                       <div className="mt-2 flex flex-wrap items-center gap-1.5">
                         {conflictIds.has(skill.id) && (
@@ -1439,9 +1493,20 @@ export function MySkills() {
                   {displayName}
                 </h3>
 
-                <p className="min-w-0 flex-1 truncate text-[13px] text-muted">
-                  {skill.description || "—"}
-                </p>
+                {(() => {
+                  const summary = summaryFor(skill.id);
+                  return summary ? (
+                    <AiSummaryText
+                      oneLine={summary.one_line}
+                      stale={summary.is_stale}
+                      className="min-w-0 flex-1 text-[13px] text-muted"
+                    />
+                  ) : (
+                    <p className="min-w-0 flex-1 truncate text-[13px] text-muted">
+                      {skill.description || "—"}
+                    </p>
+                  );
+                })()}
 
                 <div className="flex shrink-0 items-center gap-1.5">
                   {skill.tags.map((tag) => (
