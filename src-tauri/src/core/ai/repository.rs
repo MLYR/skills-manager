@@ -928,6 +928,86 @@ impl<'a> AiRepository<'a> {
                 .map_err(anyhow::Error::from)
         })
     }
+
+    pub fn list_logs(
+        &self,
+        event_kind: Option<&str>,
+        error_code: Option<&str>,
+        job_id: Option<&str>,
+        batch_id: Option<&str>,
+        cursor: Option<&str>,
+        limit: u16,
+    ) -> Result<(Vec<AiLogRecord>, Option<String>)> {
+        self.store.with_ai_connection(|connection| {
+            let (cursor_created, cursor_id) = parse_cursor(cursor)?;
+            let page_size = i64::from(limit) + 1;
+            let mut sql = String::from(
+                "SELECT id,event_kind,job_id,batch_id,target_kind,target_key,target_payload_json,
+                    skill_name,request_system_prompt,request_user_prompt,raw_response,http_status,
+                    input_tokens,output_tokens,total_tokens,duration_ms,error_code,error_message,created_at
+                 FROM ai_analysis_logs WHERE 1=1",
+            );
+            let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+            if let Some(event_kind) = event_kind {
+                sql.push_str(" AND event_kind = ?");
+                params.push(Box::new(event_kind.to_string()));
+            }
+            if let Some(error_code) = error_code {
+                sql.push_str(" AND error_code = ?");
+                params.push(Box::new(error_code.to_string()));
+            }
+            if let Some(job_id) = job_id {
+                sql.push_str(" AND job_id = ?");
+                params.push(Box::new(job_id.to_string()));
+            }
+            if let Some(batch_id) = batch_id {
+                sql.push_str(" AND batch_id = ?");
+                params.push(Box::new(batch_id.to_string()));
+            }
+            if let (Some(created_at), Some(id)) = (cursor_created, cursor_id) {
+                sql.push_str(" AND (created_at < ? OR (created_at = ? AND id < ?))");
+                params.push(Box::new(created_at));
+                params.push(Box::new(created_at));
+                params.push(Box::new(id));
+            }
+            sql.push_str(" ORDER BY created_at DESC, id DESC LIMIT ?");
+            params.push(Box::new(page_size));
+
+            let mut statement = connection.prepare(&sql)?;
+            let rows = statement.query_map(
+                rusqlite::params_from_iter(params.iter().map(|value| value.as_ref())),
+                map_log_row,
+            )?;
+            let mut logs = Vec::new();
+            for row in rows {
+                logs.push(row?);
+            }
+            let next_cursor = if logs.len() as i64 > i64::from(limit) {
+                logs.pop().expect("page has a sentinel row");
+                let final_row = logs.last().expect("page has at least one row");
+                Some(encode_cursor(final_row.created_at, &final_row.id))
+            } else {
+                None
+            };
+            Ok((logs, next_cursor))
+        })
+    }
+
+    pub fn get_log(&self, log_id: &str) -> Result<Option<AiLogRecord>> {
+        self.store.with_ai_connection(|connection| {
+            connection
+                .query_row(
+                    "SELECT id,event_kind,job_id,batch_id,target_kind,target_key,target_payload_json,
+                        skill_name,request_system_prompt,request_user_prompt,raw_response,http_status,
+                        input_tokens,output_tokens,total_tokens,duration_ms,error_code,error_message,created_at
+                     FROM ai_analysis_logs WHERE id=?1",
+                    params![log_id],
+                    map_log_row,
+                )
+                .optional()
+                .map_err(anyhow::Error::from)
+        })
+    }
 }
 
 fn insert_batch(transaction: &Transaction<'_>, batch: &AiBatchRecord) -> Result<()> {
@@ -1160,6 +1240,40 @@ fn map_batch_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AiBatchRecord> {
         created_at: row.get(23)?,
         updated_at: row.get(24)?,
         finished_at: row.get(25)?,
+    })
+}
+
+fn map_log_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AiLogRecord> {
+    let kind: String = row.get(1)?;
+    let target_kind: Option<String> = row.get(4)?;
+    Ok(AiLogRecord {
+        id: row.get(0)?,
+        event_kind: match kind.as_str() {
+            "request_started" => AiLogEventKind::RequestStarted,
+            "response_received" => AiLogEventKind::ResponseReceived,
+            "request_failed" => AiLogEventKind::RequestFailed,
+            "retry_scheduled" => AiLogEventKind::RetryScheduled,
+            "correction_requested" => AiLogEventKind::CorrectionRequested,
+            "recovery" => AiLogEventKind::Recovery,
+            _ => AiLogEventKind::Cancelled,
+        },
+        job_id: row.get(2)?,
+        batch_id: row.get(3)?,
+        target_kind: target_kind.as_deref().map(parse_target_kind),
+        target_key: row.get(5)?,
+        target_payload_json: row.get(6)?,
+        skill_name: row.get(7)?,
+        request_system_prompt: row.get(8)?,
+        request_user_prompt: row.get(9)?,
+        raw_response: row.get(10)?,
+        http_status: row.get(11)?,
+        input_tokens: row.get(12)?,
+        output_tokens: row.get(13)?,
+        total_tokens: row.get(14)?,
+        duration_ms: row.get(15)?,
+        error_code: row.get(16)?,
+        error_message: row.get(17)?,
+        created_at: row.get(18)?,
     })
 }
 

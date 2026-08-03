@@ -436,6 +436,33 @@ export interface AiQueueStatsDto {
   jobs_cancelled: number;
 }
 
+export interface AiLogSummaryDto {
+  id: string;
+  event_kind: string;
+  job_id: string | null;
+  batch_id: string | null;
+  target: AiTargetRef | null;
+  http_status: number | null;
+  duration_ms: number | null;
+  error_code: string | null;
+  created_at: number;
+}
+
+export interface AiLogDetailDto extends AiLogSummaryDto {
+  request_system_prompt: string | null;
+  request_user_prompt: string | null;
+  raw_response: string | null;
+  error_message: string | null;
+  input_tokens: number | null;
+  output_tokens: number | null;
+  total_tokens: number | null;
+}
+
+export interface AiLogPageDto {
+  items: AiLogSummaryDto[];
+  next_cursor: string | null;
+}
+
 // ── Tools ──
 
 export const getToolStatus = () => invoke<ToolInfo[]>("get_tool_status");
@@ -741,6 +768,21 @@ export const cancelAiAnalysisJob = (input: { job_id: string }) =>
 
 export const retryAiAnalysisJob = (input: { job_id: string; preview_id: string }) =>
   invoke<AiBatchDto>("retry_ai_analysis_job", { input });
+
+export const listAiAnalysisLogs = (input: {
+  event_kind?: string | null;
+  error_code?: string | null;
+  job_id?: string | null;
+  batch_id?: string | null;
+  cursor?: string | null;
+  limit: number;
+}) => invoke<AiLogPageDto>("list_ai_analysis_logs", { input });
+
+export const getAiAnalysisLog = (input: { log_id: string }) =>
+  invoke<AiLogDetailDto>("get_ai_analysis_log", { input });
+
+export const clearAiAnalysisLogs = () =>
+  invoke<{ deleted_count: number }>("clear_ai_analysis_logs");
 
 export const appExit = () => invoke<void>("app_exit");
 

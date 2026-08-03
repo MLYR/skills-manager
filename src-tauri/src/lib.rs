@@ -986,6 +986,9 @@ pub fn run() {
             commands::ai::cancel_ai_analysis_batch,
             commands::ai::cancel_ai_analysis_job,
             commands::ai::retry_ai_analysis_job,
+            commands::ai::list_ai_analysis_logs,
+            commands::ai::get_ai_analysis_log,
+            commands::ai::clear_ai_analysis_logs,
             // Tools
             commands::tools::get_tool_status,
             commands::tools::set_tool_enabled,

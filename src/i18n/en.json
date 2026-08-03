@@ -320,6 +320,15 @@
       "succeeded": "Succeeded",
       "failed": "Failed",
       "cancelled": "Cancelled"
+    },
+    "logs": {
+      "title": "AI logs",
+      "clear": "Clear all",
+      "cleared": "Deleted {{count}} log(s)",
+      "empty": "No logs yet",
+      "detail": "Log details",
+      "userPrompt": "Actual user prompt sent",
+      "response": "Raw response"
     }
   },
   "mySkills": {

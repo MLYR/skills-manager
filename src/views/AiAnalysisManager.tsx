@@ -6,10 +6,13 @@ import { useApp } from "../context/AppContext";
 import {
   cancelAiAnalysisBatch,
   cancelAiAnalysisJob,
+  clearAiAnalysisLogs,
   enqueueAiAnalysis,
+  getAiAnalysisLog,
   getAiAnalysisQueueStats,
   listAiAnalysisBatches,
   listAiAnalysisJobs,
+  listAiAnalysisLogs,
   pauseAiAnalysisBatch,
   previewAiAnalysis,
   resumeAiAnalysisBatch,
@@ -17,6 +20,8 @@ import {
   type AiAnalysisPreviewDto,
   type AiBatchDto,
   type AiJobDto,
+  type AiLogDetailDto,
+  type AiLogSummaryDto,
   type AiQueueStatsDto,
   type AiTargetRef,
 } from "../lib/tauri";
@@ -30,6 +35,8 @@ export function AiAnalysisManager() {
   const [batches, setBatches] = useState<AiBatchDto[]>([]);
   const [selectedBatchId, setSelectedBatchId] = useState<string | null>(null);
   const [jobs, setJobs] = useState<AiJobDto[]>([]);
+  const [logs, setLogs] = useState<AiLogSummaryDto[]>([]);
+  const [selectedLog, setSelectedLog] = useState<AiLogDetailDto | null>(null);
   const [loading, setLoading] = useState(true);
   const [preview, setPreview] = useState<AiAnalysisPreviewDto | null>(null);
   const [previewBusy, setPreviewBusy] = useState(false);
@@ -45,6 +52,12 @@ export function AiAnalysisManager() {
           return nextBatches.items[0]?.id ?? null;
         });
       })
+      .catch((error) => toast.error(aiErrorMessage(error)));
+  }, []);
+
+  const loadLogs = useCallback(() => {
+    listAiAnalysisLogs({ limit: 100 })
+      .then((page) => setLogs(page.items))
       .catch((error) => toast.error(aiErrorMessage(error)));
   }, []);
 
@@ -67,11 +80,16 @@ export function AiAnalysisManager() {
 
   useEffect(() => {
     refresh();
+    loadLogs();
     // Real backend state only: the fast interval re-reads batches/jobs, never
     // the full filesystem-backed stats scan, and never fabricates progress.
     const timer = window.setInterval(loadBatches, 2_000);
     return () => window.clearInterval(timer);
-  }, [refresh, loadBatches]);
+  }, [refresh, loadBatches, loadLogs]);
+
+  useEffect(() => {
+    loadLogs();
+  }, [loadLogs]);
 
   useEffect(() => {
     if (!selectedBatchId) {
@@ -129,6 +147,25 @@ export function AiAnalysisManager() {
       const next = await previewAiAnalysis({ targets: [job.target], mode: "force" });
       setRetryJob(job);
       setPreview(next);
+    } catch (error) {
+      toast.error(aiErrorMessage(error));
+    }
+  };
+
+  const openLog = async (logId: string) => {
+    try {
+      setSelectedLog(await getAiAnalysisLog({ log_id: logId }));
+    } catch (error) {
+      toast.error(aiErrorMessage(error));
+    }
+  };
+
+  const handleClearLogs = async () => {
+    try {
+      const result = await clearAiAnalysisLogs();
+      toast.success(t("ai.logs.cleared", { count: result.deleted_count }));
+      setSelectedLog(null);
+      loadLogs();
     } catch (error) {
       toast.error(aiErrorMessage(error));
     }
@@ -316,6 +353,69 @@ export function AiAnalysisManager() {
                 </div>
               </div>
             ))}
+          </div>
+        )}
+      </section>
+
+      <section className="rounded-xl border border-border-subtle bg-surface/70">
+        <div className="flex items-center justify-between border-b border-border-subtle px-4 py-3">
+          <span className="text-[13px] font-semibold text-secondary">{t("ai.logs.title")}</span>
+          <button
+            type="button"
+            onClick={handleClearLogs}
+            className="rounded-full bg-surface-hover px-2.5 py-1 text-[12px] font-medium text-muted transition-colors hover:text-red-500"
+          >
+            {t("ai.logs.clear")}
+          </button>
+        </div>
+        {logs.length === 0 ? (
+          <div className="px-4 py-8 text-center text-[12.5px] text-muted">{t("ai.logs.empty")}</div>
+        ) : (
+          <div className="max-h-64 overflow-y-auto">
+            {logs.map((log) => (
+              <button
+                key={log.id}
+                type="button"
+                onClick={() => openLog(log.id)}
+                className="flex w-full items-center gap-3 border-b border-border-subtle px-4 py-2 text-left text-[12px] last:border-b-0 hover:bg-surface-hover/50"
+              >
+                <span className="shrink-0 rounded-full bg-surface-hover px-2 py-0.5 text-[11px] text-muted">
+                  {log.event_kind}
+                </span>
+                <span className="min-w-0 flex-1 truncate text-muted">
+                  {log.error_code || (log.target ? log.target.kind : "") || log.id.slice(0, 8)}
+                </span>
+                <span className="shrink-0 text-[11px] text-faint">
+                  {new Date(log.created_at).toLocaleTimeString()}
+                </span>
+              </button>
+            ))}
+          </div>
+        )}
+        {selectedLog && (
+          <div className="space-y-3 border-t border-border-subtle px-4 py-3">
+            <div className="text-[12px] font-semibold text-secondary">{t("ai.logs.detail")}</div>
+            {selectedLog.request_user_prompt && (
+              <div>
+                <div className="mb-1 text-[11px] font-medium text-faint">{t("ai.logs.userPrompt")}</div>
+                <pre className="max-h-40 overflow-y-auto whitespace-pre-wrap rounded bg-bg-secondary p-2 text-[11.5px] leading-[16px] text-muted">
+                  {selectedLog.request_user_prompt}
+                </pre>
+              </div>
+            )}
+            {selectedLog.raw_response && (
+              <div>
+                <div className="mb-1 text-[11px] font-medium text-faint">{t("ai.logs.response")}</div>
+                <pre className="max-h-40 overflow-y-auto whitespace-pre-wrap rounded bg-bg-secondary p-2 text-[11.5px] leading-[16px] text-muted">
+                  {selectedLog.raw_response}
+                </pre>
+              </div>
+            )}
+            {selectedLog.error_message && (
+              <div className="rounded bg-red-500/8 px-2 py-1.5 text-[12px] text-red-500">
+                {selectedLog.error_message}
+              </div>
+            )}
           </div>
         )}
       </section>

@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tauri::State;
 
 use crate::core::ai::command_error;
@@ -26,8 +26,9 @@ use crate::core::ai::types::{
     AiAnalysisStatus, AiAnalysisSummaryDto, AiApiKeyStatusDto, AiBatchDto, AiBatchListInput,
     AiBatchPageDto, AiBatchRecord, AiBatchStatus, AiCommandError, AiConfigDto, AiConfigInput,
     AiConnectionTestDto, AiConnectionTestInput, AiErrorCode, AiErrorKind, AiJobListInput,
-    AiJobPageDto, AiJobRecord, AiJobStatus, AiPreviewEligibility, AiProviderPresetDto,
-    AiQueueStatsDto, AiTargetRef,
+    AiJobPageDto, AiJobRecord, AiJobStatus, AiLogDetailDto, AiLogListInput, AiLogPageDto,
+    AiLogRecord, AiLogSummaryDto, AiPreviewEligibility, AiProviderPresetDto, AiQueueStatsDto,
+    AiTargetRef,
 };
 use crate::core::project_scanner;
 use crate::core::skill_store::SkillStore;
@@ -100,6 +101,18 @@ pub struct GetAiBatchInput {
 pub struct RetryAiJobInput {
     job_id: String,
     preview_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct GetAiLogInput {
+    log_id: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct ClearAiLogsDto {
+    deleted_count: i64,
 }
 
 #[tauri::command]
@@ -625,6 +638,131 @@ pub async fn retry_ai_analysis_job(
         to_batch_dto(&store, &batch)
     })
     .await
+}
+
+#[tauri::command]
+pub async fn list_ai_analysis_logs(
+    input: AiLogListInput,
+    store: State<'_, Arc<SkillStore>>,
+) -> Result<AiLogPageDto, AiCommandError> {
+    validate_log_event_kind_filter(input.event_kind.as_deref())?;
+    if input.limit == 0 || input.limit > 100 {
+        return Err(command_error(
+            AiErrorKind::Validation,
+            AiErrorCode::InvalidState,
+            "AI log list limit must be between 1 and 100.",
+            false,
+        ));
+    }
+    let store = store.inner().clone();
+    run_blocking(move || {
+        let (logs, next_cursor) = repository_result(AiRepository::new(&store).list_logs(
+            input.event_kind.as_deref(),
+            input.error_code.as_deref(),
+            input.job_id.as_deref(),
+            input.batch_id.as_deref(),
+            input.cursor.as_deref(),
+            input.limit,
+        ))?;
+        let items = logs
+            .iter()
+            .map(log_to_summary)
+            .collect::<Result<Vec<_>, AiCommandError>>()?;
+        Ok(AiLogPageDto { items, next_cursor })
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn get_ai_analysis_log(
+    input: GetAiLogInput,
+    store: State<'_, Arc<SkillStore>>,
+) -> Result<AiLogDetailDto, AiCommandError> {
+    let store = store.inner().clone();
+    run_blocking(move || {
+        let log = repository_result(AiRepository::new(&store).get_log(&input.log_id))?
+            .ok_or_else(|| not_found_error("log"))?;
+        log_to_detail(&log)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn clear_ai_analysis_logs(
+    store: State<'_, Arc<SkillStore>>,
+) -> Result<ClearAiLogsDto, AiCommandError> {
+    let store = store.inner().clone();
+    run_blocking(move || {
+        let deleted_count = crate::core::ai::logs::clear_logs(&store)?;
+        Ok(ClearAiLogsDto {
+            deleted_count: i64::try_from(deleted_count).unwrap_or(i64::MAX),
+        })
+    })
+    .await
+}
+
+fn log_to_summary(log: &AiLogRecord) -> Result<AiLogSummaryDto, AiCommandError> {
+    Ok(AiLogSummaryDto {
+        id: log.id.clone(),
+        event_kind: log.event_kind.as_str().to_string(),
+        job_id: log.job_id.clone(),
+        batch_id: log.batch_id.clone(),
+        target: log_target(&log.target_payload_json),
+        http_status: log.http_status,
+        duration_ms: log.duration_ms,
+        error_code: log.error_code.clone(),
+        created_at: log.created_at,
+    })
+}
+
+fn log_to_detail(log: &AiLogRecord) -> Result<AiLogDetailDto, AiCommandError> {
+    Ok(AiLogDetailDto {
+        id: log.id.clone(),
+        event_kind: log.event_kind.as_str().to_string(),
+        job_id: log.job_id.clone(),
+        batch_id: log.batch_id.clone(),
+        target: log_target(&log.target_payload_json),
+        http_status: log.http_status,
+        duration_ms: log.duration_ms,
+        error_code: log.error_code.clone(),
+        created_at: log.created_at,
+        request_system_prompt: log.request_system_prompt.clone(),
+        request_user_prompt: log.request_user_prompt.clone(),
+        raw_response: log.raw_response.clone(),
+        error_message: log.error_message.clone(),
+        input_tokens: log.input_tokens,
+        output_tokens: log.output_tokens,
+        total_tokens: log.total_tokens,
+    })
+}
+
+fn log_target(payload: &Option<String>) -> Option<AiTargetRef> {
+    payload
+        .as_deref()
+        .and_then(|value| serde_json::from_str(value).ok())
+}
+
+fn validate_log_event_kind_filter(event_kind: Option<&str>) -> Result<(), AiCommandError> {
+    if let Some(event_kind) = event_kind {
+        if !matches!(
+            event_kind,
+            "request_started"
+                | "response_received"
+                | "request_failed"
+                | "retry_scheduled"
+                | "correction_requested"
+                | "recovery"
+                | "cancelled"
+        ) {
+            return Err(command_error(
+                AiErrorKind::Validation,
+                AiErrorCode::InvalidState,
+                "Invalid AI log event kind filter.",
+                false,
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn build_queue_stats(store: &SkillStore) -> Result<AiQueueStatsDto, AiCommandError> {

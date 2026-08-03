@@ -320,6 +320,15 @@
       "succeeded": "成功",
       "failed": "失败",
       "cancelled": "已取消"
+    },
+    "logs": {
+      "title": "AI 日志",
+      "clear": "一键清空",
+      "cleared": "已删除 {{count}} 条日志",
+      "empty": "暂无日志",
+      "detail": "日志详情",
+      "userPrompt": "实际发送的用户提示词",
+      "response": "原始响应"
     }
   },
   "mySkills": {
