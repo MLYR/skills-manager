@@ -344,7 +344,12 @@ impl<'a> AiRepository<'a> {
                 ],
             )?;
             transaction.execute(
-                "UPDATE ai_analysis_jobs SET status='succeeded', finished_at=?1, updated_at=?1
+                // A successful retry supersedes any transient provider error;
+                // clearing both fields keeps detail/list DTOs from showing a
+                // stale red error beside a successful result.
+                "UPDATE ai_analysis_jobs
+                 SET status='succeeded', error_code=NULL, error_message=NULL,
+                     finished_at=?1, updated_at=?1
                  WHERE id=?2 AND status='running'",
                 params![now, job_id],
             )?;
@@ -1838,6 +1843,16 @@ mod tests {
             AttemptReservation::NoBudget
         );
 
+        store
+            .with_ai_transaction(|transaction| {
+                transaction.execute(
+                    "UPDATE ai_analysis_jobs SET error_code='schema_validation', error_message='old failure' WHERE id='job-budget'",
+                    [],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+
         let log = running_log("job-budget", 300);
         let outcome = repository
             .complete_success(
@@ -1870,6 +1885,16 @@ mod tests {
             .unwrap();
         assert_eq!(outcome, CompleteOutcome::Succeeded);
         assert_eq!(job_status(&store, "job-budget"), "succeeded");
+        let errors: (Option<String>, Option<String>) = store
+            .with_ai_connection(|connection| {
+                Ok(connection.query_row(
+                    "SELECT error_code,error_message FROM ai_analysis_jobs WHERE id='job-budget'",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )?)
+            })
+            .unwrap();
+        assert_eq!(errors, (None, None));
         assert_eq!(batch_status(&store, "batch-budget"), "completed");
     }
 

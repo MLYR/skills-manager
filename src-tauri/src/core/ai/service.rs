@@ -167,7 +167,13 @@ async fn run_job(
                         latency_ms,
                     } => {
                         if status.is_success() {
-                            match validate_ai_analysis_result_v1(&body) {
+                            // OpenAI-compatible chat completions wrap the model
+                            // text in choices[0].message.content; validating the
+                            // envelope itself always fails schema v1. Extract
+                            // the inner content first, then validate it.
+                            match extract_analysis_payload(&body)
+                                .and_then(|payload| validate_ai_analysis_result_v1(&payload))
+                            {
                                 Ok(result) => {
                                     let now = now_millis();
                                     let (input, output, total) = extract_usage(&body);
@@ -700,6 +706,45 @@ fn extract_usage(body: &[u8]) -> (Option<i64>, Option<i64>, Option<i64>) {
     )
 }
 
+/// Extract the assistant content from an OpenAI-compatible chat completion
+/// envelope. The schema validator must see the model's inner JSON, never the
+/// transport wrapper (`choices`/`usage`), otherwise every real response fails.
+/// Some local OpenAI-compatible servers return the schema object directly, so
+/// a body that is already a JSON object is passed through unchanged.
+fn extract_analysis_payload(body: &[u8]) -> Result<Vec<u8>, AiCommandError> {
+    let value: serde_json::Value = serde_json::from_slice(body).map_err(|_| {
+        super::command_error(
+            AiErrorKind::Provider,
+            AiErrorCode::InvalidJson,
+            "The AI provider returned invalid JSON.",
+            false,
+        )
+    })?;
+
+    if let Some(content) = value
+        .get("choices")
+        .and_then(|choices| choices.get(0))
+        .and_then(|choice| choice.get("message"))
+        .and_then(|message| message.get("content"))
+        .and_then(|content| content.as_str())
+    {
+        return Ok(content.as_bytes().to_vec());
+    }
+
+    // Direct-schema responses (some local OpenAI-compatible servers) pass the
+    // body through; the schema validator still enforces all field rules.
+    if value.is_object() {
+        return Ok(body.to_vec());
+    }
+
+    Err(super::command_error(
+        AiErrorKind::Provider,
+        AiErrorCode::SchemaValidation,
+        "The AI provider response does not match analysis schema v1.",
+        false,
+    ))
+}
+
 /// Frozen backoff: first retry after 2s, second after 4s.
 fn backoff_seconds(attempt_number: i64) -> i64 {
     if attempt_number <= 1 {
@@ -762,6 +807,59 @@ mod tests {
                 br#"{"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}"#
             ),
             (Some(10), Some(5), Some(15))
+        );
+    }
+
+    #[test]
+    fn payload_extraction_unwraps_openai_envelope_and_passes_direct_schema() {
+        let inner = serde_json::json!({
+            "one_line": "Summary",
+            "what_it_does": "Explains",
+            "when_to_use": [],
+            "how_to_use": [],
+            "example_prompts": [],
+            "requirements": [],
+            "not_for": [],
+            "warnings": []
+        });
+        let envelope = serde_json::json!({
+            "id": "chatcmpl-test",
+            "object": "chat.completion",
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": inner.to_string()},
+                "finish_reason": "stop"
+            }],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+        });
+        let payload = extract_analysis_payload(&serde_json::to_vec(&envelope).unwrap()).unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(&payload).unwrap();
+        assert_eq!(parsed["one_line"], "Summary");
+
+        // Direct-schema responses pass through unchanged.
+        let direct = serde_json::to_vec(&inner).unwrap();
+        assert_eq!(extract_analysis_payload(&direct).unwrap(), direct);
+    }
+
+    #[test]
+    fn payload_extraction_rejects_missing_content_and_invalid_json() {
+        let envelope = serde_json::json!({"choices": [], "usage": {}});
+        // An object body without message.content is passed through as a direct
+        // schema candidate; the schema validator (not extraction) must reject
+        // its missing business fields.
+        let payload = extract_analysis_payload(&serde_json::to_vec(&envelope).unwrap()).unwrap();
+        assert_eq!(
+            validate_ai_analysis_result_v1(&payload).unwrap_err().code,
+            AiErrorCode::SchemaValidation
+        );
+        // A non-object body is rejected by extraction itself.
+        assert_eq!(
+            extract_analysis_payload(b"[1,2,3]").unwrap_err().code,
+            AiErrorCode::SchemaValidation
+        );
+        assert_eq!(
+            extract_analysis_payload(b"{not-json").unwrap_err().code,
+            AiErrorCode::InvalidJson
         );
     }
 
@@ -896,6 +994,180 @@ mod tests {
             })
             .unwrap();
         assert_eq!(error_code, "content_changed");
+        crate::core::central_repo::set_runtime_skills_dir_override(None);
+    }
+
+    #[tokio::test]
+    async fn full_analysis_closed_loop_accepts_openai_chat_envelope() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let _guard = CENTRAL_ROOT_LOCK.lock().unwrap();
+        let directory = tempdir().unwrap();
+        let store = Arc::new(SkillStore::new(&directory.path().join("service.db")).unwrap());
+        let skill_root = directory.path().join("skills");
+        let skill_dir = skill_root.join("demo");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(skill_dir.join("SKILL.md"), "version one").unwrap();
+        crate::core::central_repo::set_runtime_skills_dir_override(Some(skill_root.clone()));
+        store
+            .insert_skill(&crate::core::skill_store::SkillRecord {
+                id: "svc-envelope".into(),
+                name: "Demo".into(),
+                description: None,
+                source_type: "git".into(),
+                source_ref: None,
+                source_ref_resolved: None,
+                source_subpath: None,
+                source_branch: None,
+                source_revision: None,
+                remote_revision: None,
+                central_path: skill_dir.to_string_lossy().into_owned(),
+                content_hash: None,
+                enabled: true,
+                created_at: 1,
+                updated_at: 1,
+                status: "ready".into(),
+                update_status: "in_sync".into(),
+                last_checked_at: None,
+                last_check_error: None,
+            })
+            .unwrap();
+
+        // Realistic OpenAI-compatible chat completion response: the schema
+        // object lives inside choices[0].message.content, plus usage tokens.
+        let inner = serde_json::json!({
+            "one_line": "Summarizes the skill.",
+            "what_it_does": "Explains capabilities.",
+            "when_to_use": [],
+            "how_to_use": [],
+            "example_prompts": [],
+            "requirements": [],
+            "not_for": [],
+            "warnings": []
+        });
+        let envelope = serde_json::json!({
+            "id": "chatcmpl-test",
+            "object": "chat.completion",
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": inner.to_string()},
+                "finish_reason": "stop"
+            }],
+            "usage": {"prompt_tokens": 12, "completion_tokens": 8, "total_tokens": 20}
+        });
+        let body = serde_json::to_vec(&envelope).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buffer = [0_u8; 8192];
+            let mut request = Vec::new();
+            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                let count = socket.read(&mut buffer).await.unwrap();
+                if count == 0 {
+                    break;
+                }
+                request.extend_from_slice(&buffer[..count]);
+            }
+            let head = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            socket.write_all(head.as_bytes()).await.unwrap();
+            socket.write_all(&body).await.unwrap();
+        });
+        let base_url = format!("http://{address}/v1/");
+
+        crate::core::ai::config::save_config(
+            &store,
+            &super::super::types::AiConfigInput {
+                provider: "ollama".into(),
+                base_url: base_url.clone(),
+                model: "local-model".into(),
+                output_language: "en".into(),
+                timeout_seconds: 30,
+                concurrency: 1,
+                log_retention_days: 30,
+                input_price_micros_per_million: None,
+                output_price_micros_per_million: None,
+            },
+        )
+        .unwrap();
+
+        let repository = super::super::repository::AiRepository::new(&store);
+        let mut batch = claim_batch("svc-envelope-batch");
+        batch.base_url = base_url;
+        let now = now_millis();
+        let job = super::super::types::AiJobRecord {
+            id: "svc-envelope-job".into(),
+            batch_id: batch.id.clone(),
+            ordinal: 0,
+            target_kind: AiTargetKind::Managed,
+            target_key: "[\"svc-envelope\"]".into(),
+            target_payload_json: "{\"kind\":\"managed\",\"skill_id\":\"svc-envelope\"}".into(),
+            skill_name: "Demo".into(),
+            expected_source_hash: hex::encode(sha2::Sha256::digest(b"version one")),
+            status: AiJobStatus::Queued,
+            priority: 0,
+            attempt_count: 0,
+            manual_retry_count: 0,
+            correction_attempted: false,
+            cancel_requested: false,
+            next_retry_at: None,
+            error_code: None,
+            error_message: None,
+            created_at: now,
+            updated_at: now,
+            started_at: None,
+            finished_at: None,
+        };
+        repository
+            .insert_batch_with_jobs(&batch, &[job.clone()])
+            .unwrap();
+
+        let claimed = repository
+            .claim_next_job(now_millis())
+            .unwrap()
+            .expect("job should be claimable");
+        let state = Arc::new(super::super::runner::AiRuntimeState::new());
+        process_job(store.clone(), state, claimed).await;
+
+        let status: String = store
+            .with_ai_connection(|connection| {
+                connection
+                    .query_row(
+                        "SELECT status FROM ai_analysis_jobs WHERE id='svc-envelope-job'",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .map_err(anyhow::Error::from)
+            })
+            .unwrap();
+        assert_eq!(status, "succeeded");
+
+        let (one_line, input_tokens, output_tokens, total_tokens): (
+            String,
+            Option<i64>,
+            Option<i64>,
+            Option<i64>,
+        ) = store
+            .with_ai_connection(|connection| {
+                connection
+                    .query_row(
+                        "SELECT one_line, input_tokens, output_tokens, total_tokens
+                             FROM skill_ai_analyses WHERE target_key='[\"svc-envelope\"]'",
+                        [],
+                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                    )
+                    .map_err(anyhow::Error::from)
+            })
+            .unwrap();
+        assert_eq!(one_line, "Summarizes the skill.");
+        assert_eq!(input_tokens, Some(12));
+        assert_eq!(output_tokens, Some(8));
+        assert_eq!(total_tokens, Some(20));
+
         crate::core::central_repo::set_runtime_skills_dir_override(None);
     }
 }

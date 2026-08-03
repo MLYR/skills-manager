@@ -772,14 +772,15 @@ fn build_queue_stats(store: &SkillStore) -> Result<AiQueueStatsDto, AiCommandErr
     let config = load_config(store).ok();
 
     let mut targets = Vec::new();
-    let managed = store
-        .get_all_skills()
-        .map_err(|_| storage_error("list managed skills"))?;
-    targets.extend(
-        managed
-            .into_iter()
-            .map(|skill| AiTargetRef::Managed { skill_id: skill.id }),
-    );
+    // Statistics are best-effort: a single listing failure must not prevent the
+    // manager page from opening (batch/job counts are returned regardless).
+    if let Ok(managed) = store.get_all_skills() {
+        targets.extend(
+            managed
+                .into_iter()
+                .map(|skill| AiTargetRef::Managed { skill_id: skill.id }),
+        );
+    }
     for adapter in tool_adapters::all_tool_adapters(store) {
         let skills = project_scanner::read_linked_workspace_skills(
             &adapter.skills_dir(),
@@ -793,39 +794,38 @@ fn build_queue_stats(store: &SkillStore) -> Result<AiQueueStatsDto, AiCommandErr
             relative_path: skill.relative_path,
         }));
     }
-    let projects = store
-        .get_all_projects()
-        .map_err(|_| storage_error("list workspaces"))?;
-    for record in projects {
-        if record.workspace_type == "linked" {
-            let agent_key = record
-                .linked_agent_key
-                .clone()
-                .unwrap_or_else(|| crate::commands::projects::slugify_skill_dir_name(&record.name));
-            let agent_name = record
-                .linked_agent_name
-                .clone()
-                .unwrap_or_else(|| record.name.clone());
-            let skills = project_scanner::read_linked_workspace_skills(
-                Path::new(&record.path),
-                record.disabled_path.as_deref().map(Path::new),
-                &agent_key,
-                &agent_name,
-                true,
-            );
-            targets.extend(skills.into_iter().map(|skill| AiTargetRef::ProjectLocal {
-                project_id: record.id.clone(),
-                agent_key: skill.agent,
-                relative_path: skill.relative_path,
-            }));
-        } else {
-            let configs = crate::core::ai::document::agent_scan_configs(store);
-            let skills = project_scanner::read_project_skills(Path::new(&record.path), &configs);
-            targets.extend(skills.into_iter().map(|skill| AiTargetRef::ProjectLocal {
-                project_id: record.id.clone(),
-                agent_key: skill.agent,
-                relative_path: skill.relative_path,
-            }));
+    if let Ok(projects) = store.get_all_projects() {
+        for record in projects {
+            if record.workspace_type == "linked" {
+                let agent_key = record.linked_agent_key.clone().unwrap_or_else(|| {
+                    crate::commands::projects::slugify_skill_dir_name(&record.name)
+                });
+                let agent_name = record
+                    .linked_agent_name
+                    .clone()
+                    .unwrap_or_else(|| record.name.clone());
+                let skills = project_scanner::read_linked_workspace_skills(
+                    Path::new(&record.path),
+                    record.disabled_path.as_deref().map(Path::new),
+                    &agent_key,
+                    &agent_name,
+                    true,
+                );
+                targets.extend(skills.into_iter().map(|skill| AiTargetRef::ProjectLocal {
+                    project_id: record.id.clone(),
+                    agent_key: skill.agent,
+                    relative_path: skill.relative_path,
+                }));
+            } else {
+                let configs = crate::core::ai::document::agent_scan_configs(store);
+                let skills =
+                    project_scanner::read_project_skills(Path::new(&record.path), &configs);
+                targets.extend(skills.into_iter().map(|skill| AiTargetRef::ProjectLocal {
+                    project_id: record.id.clone(),
+                    agent_key: skill.agent,
+                    relative_path: skill.relative_path,
+                }));
+            }
         }
     }
 
@@ -846,7 +846,11 @@ fn build_queue_stats(store: &SkillStore) -> Result<AiQueueStatsDto, AiCommandErr
         total += 1;
         let (outcome, document) = collect_document(store, target);
         let (kind, key, _) = canonical_target(target);
-        let state = repository_result(repository.get_target_state_by_key(&kind, &key))?;
+        // Per-target query failures degrade to unparsed rather than failing the
+        // whole page.
+        let state = repository
+            .get_target_state_by_key(&kind, &key)
+            .unwrap_or_default();
         let status = compute_status(
             &outcome,
             config.as_ref(),
@@ -936,15 +940,6 @@ fn not_found_error(subject: &str) -> AiCommandError {
         AiErrorCode::NotFound,
         format!("The AI analysis {subject} does not exist."),
         false,
-    )
-}
-
-fn storage_error(operation: &str) -> AiCommandError {
-    command_error(
-        AiErrorKind::Storage,
-        AiErrorCode::Db,
-        format!("Unable to {operation}."),
-        true,
     )
 }
 
@@ -1154,19 +1149,25 @@ fn build_analysis_detail(
     let result = analysis
         .and_then(|record| serde_json::from_str::<AiAnalysisResultV1>(&record.result_json).ok());
     let active_job = state.active_job.as_ref().map(job_to_dto).transpose()?;
-    let last_error = state.latest_failed_job.as_ref().map(|job| {
-        let code = job
-            .error_code
-            .as_deref()
-            .map(error_code_from_name)
-            .unwrap_or(AiErrorCode::HttpRequest);
-        command_error(
-            AiErrorKind::Provider,
-            code,
-            job.error_message.clone().unwrap_or_default(),
-            false,
-        )
-    });
+    // Only expose an error while the current target is actually failed. A
+    // previous failed attempt may remain in the queue history after a later
+    // retry succeeds; surfacing it here would contradict the visible result.
+    let last_error = (status == AiAnalysisStatus::Failed)
+        .then(|| state.latest_failed_job.as_ref())
+        .flatten()
+        .map(|job| {
+            let code = job
+                .error_code
+                .as_deref()
+                .map(error_code_from_name)
+                .unwrap_or(AiErrorCode::HttpRequest);
+            command_error(
+                AiErrorKind::Provider,
+                code,
+                job.error_message.clone().unwrap_or_default(),
+                false,
+            )
+        });
     Ok(AiAnalysisDetailDto {
         target: target.clone(),
         status,
@@ -1220,13 +1221,13 @@ fn build_summary_dto(
         is_stale: status == AiAnalysisStatus::Stale,
         updated_at: analysis.map(|record| record.updated_at),
         active_job_id: state.active_job.as_ref().map(|job| job.id.clone()),
-        error_code: state
-            .latest_failed_job
-            .as_ref()
+        error_code: (status == AiAnalysisStatus::Failed)
+            .then(|| state.latest_failed_job.as_ref())
+            .flatten()
             .and_then(|job| job.error_code.clone()),
-        error_message: state
-            .latest_failed_job
-            .as_ref()
+        error_message: (status == AiAnalysisStatus::Failed)
+            .then(|| state.latest_failed_job.as_ref())
+            .flatten()
             .and_then(|job| job.error_message.clone()),
     }
 }
