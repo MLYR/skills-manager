@@ -4958,6 +4958,7 @@ dependencies = [
  "image",
  "junction",
  "keyring",
+ "libc",
  "log",
  "notify",
  "rand 0.8.5",
@@ -4984,6 +4985,7 @@ dependencies = [
  "urlencoding",
  "uuid",
  "walkdir",
+ "windows-sys 0.59.0",
  "zip 2.4.2",
 ]
 

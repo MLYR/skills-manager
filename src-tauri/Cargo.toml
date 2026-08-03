@@ -55,5 +55,16 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 notify = "6.1.1"
 clap = { version = "4.5", features = ["derive"] }
 
+[target.'cfg(unix)'.dependencies]
+# AI Document Collector needs descriptor-relative O_NOFOLLOW opening so a
+# checked-then-reopened path cannot race a symlink swap (TOCTOU). The standard
+# library has no portable no-follow directory walk, so Unix uses libc::openat
+# (already present in the lockfile as a transitive dependency).
+libc = "0.2"
+
 [target.'cfg(windows)'.dependencies]
 junction = "2"
+# Declared as the direct platform dependency for reparse-point-safe document
+# reads; the current Windows branch uses a conservative std-based check until
+# a Windows environment can validate the handle-level implementation.
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }

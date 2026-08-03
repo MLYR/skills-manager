@@ -1,10 +1,16 @@
 // Keep AI storage, credentials, provider traffic, and log retention behind one
 // module boundary so later runner code cannot bypass their security checks.
 pub mod config;
+pub mod document;
 pub mod logs;
+pub mod preview;
+pub mod prompt;
 pub mod provider;
 pub mod repository;
+pub mod runner;
+pub mod schema;
 pub mod secret_store;
+pub mod service;
 pub mod types;
 
 use types::{AiCommandError, AiErrorCode, AiErrorKind};

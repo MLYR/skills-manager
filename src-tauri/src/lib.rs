@@ -777,11 +777,14 @@ pub fn run() {
     let store_for_setup = store.clone();
 
     let cancel_registry = Arc::new(core::install_cancel::InstallCancelRegistry::new());
+    let ai_runtime = Arc::new(core::ai::runner::AiRuntimeState::new());
+    let ai_runtime_for_setup = ai_runtime.clone();
 
     let builder_start = Instant::now();
     tauri::Builder::default()
         .manage(store)
         .manage(cancel_registry)
+        .manage(ai_runtime)
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             restore_main_window(app);
         }))
@@ -874,6 +877,11 @@ pub fn run() {
                 }
             });
 
+            // AI analysis startup recovery + persistent runner: interrupted
+            // jobs are requeued (attempt counters intact) and the runner begins
+            // claiming confirmed work. Never holds API key material.
+            core::ai::runner::start(store_for_setup.clone(), ai_runtime_for_setup.clone());
+
             let step = Instant::now();
             if is_tray_icon_enabled(&store_for_setup) {
                 ensure_tray_icon(app.handle())?;
@@ -964,6 +972,11 @@ pub fn run() {
             commands::ai::set_ai_api_key,
             commands::ai::delete_ai_api_key,
             commands::ai::test_ai_connection,
+            // AI analysis
+            commands::ai::preview_ai_analysis,
+            commands::ai::enqueue_ai_analysis,
+            commands::ai::get_ai_analysis,
+            commands::ai::list_ai_analysis_summaries,
             // Tools
             commands::tools::get_tool_status,
             commands::tools::set_tool_enabled,

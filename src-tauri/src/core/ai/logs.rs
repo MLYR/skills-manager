@@ -24,9 +24,21 @@ impl SanitizedAiLogRecord {
 
 pub fn save_log(
     store: &SkillStore,
-    mut record: AiLogRecord,
+    record: AiLogRecord,
     current_api_key: Option<&str>,
 ) -> Result<(), AiCommandError> {
+    let sanitized = sanitized_record(record, current_api_key);
+    AiRepository::new(store)
+        .insert_log(&sanitized)
+        .map_err(|_| log_storage_error("save"))
+}
+
+/// The only constructor of `SanitizedAiLogRecord`: raw semantic text crosses
+/// the redaction gate here, and repository code cannot build one itself.
+pub(super) fn sanitized_record(
+    mut record: AiLogRecord,
+    current_api_key: Option<&str>,
+) -> SanitizedAiLogRecord {
     // All untrusted semantic text passes exact-key replacement before generic
     // redaction; callers never hand a raw record directly to the repository.
     sanitize_optional(&mut record.skill_name, current_api_key, false);
@@ -36,10 +48,7 @@ pub fn save_log(
     sanitize_optional(&mut record.request_user_prompt, current_api_key, false);
     sanitize_optional(&mut record.raw_response, current_api_key, false);
     sanitize_optional(&mut record.error_message, current_api_key, true);
-    let sanitized = SanitizedAiLogRecord(record);
-    AiRepository::new(store)
-        .insert_log(&sanitized)
-        .map_err(|_| log_storage_error("save"))
+    SanitizedAiLogRecord(record)
 }
 
 pub fn cleanup_expired_logs_on_startup(store: &SkillStore) -> Result<usize, AiCommandError> {

@@ -10,6 +10,7 @@ use super::config::{provider_requires_api_key, validate_connection_config};
 use super::types::{AiCommandError, AiConfigInput, AiErrorCode, AiErrorKind};
 
 pub const MAX_RESPONSE_BYTES: usize = 1_048_576;
+pub const MAX_ANALYSIS_OUTPUT_TOKENS: u32 = 2_048;
 const CHAT_COMPLETIONS_PATH: &str = "chat/completions";
 
 /// Once request sending begins, every outcome stays in this type so callers
@@ -23,6 +24,23 @@ pub enum ProviderAttempt {
     Failed {
         code: AiErrorCode,
         message: String,
+        latency_ms: i64,
+    },
+}
+
+/// Analysis request outcome. `retryable` is decided from the status so the
+/// runner never retries authentication or request-shape failures.
+pub enum AnalysisAttempt {
+    Response {
+        status: StatusCode,
+        body: Vec<u8>,
+        retry_after_secs: Option<u64>,
+        latency_ms: i64,
+    },
+    Failed {
+        code: AiErrorCode,
+        message: String,
+        retryable: bool,
         latency_ms: i64,
     },
 }
@@ -109,6 +127,107 @@ pub async fn send_minimal_completion(
     read_bounded_response(response, started).await
 }
 
+/// Send the real analysis payload. It reuses the same client security (no
+/// redirects, loopback-only plaintext, HTTPS-only bearer, no cookie) and the
+/// same bounded streaming read as the connection test; only the body shape and
+/// Retry-After extraction differ.
+pub async fn send_analysis_completion(
+    config: &AiConfigInput,
+    api_key: Option<&str>,
+    proxy_url: Option<&str>,
+    system_prompt: &str,
+    user_prompt: &str,
+) -> Result<AnalysisAttempt, AiCommandError> {
+    validate_connection_config(config)?;
+    let base_url = validate_base_url(&config.provider, &config.base_url)?;
+    let key_required = provider_requires_api_key(&config.provider);
+    if key_required
+        && api_key
+            .map(str::trim)
+            .filter(|key| !key.is_empty())
+            .is_none()
+    {
+        return Err(command_error(
+            AiErrorKind::Configuration,
+            AiErrorCode::KeyUnavailable,
+            "An API key is required for this provider.",
+            false,
+        ));
+    }
+
+    let loopback_http = base_url.scheme() == "http";
+    let client = build_client(config.timeout_seconds, loopback_http, proxy_url)?;
+    let endpoint = base_url
+        .join(CHAT_COMPLETIONS_PATH)
+        .map_err(|_| invalid_base_url())?;
+    let request = build_analysis_request(
+        &client,
+        endpoint,
+        config,
+        if base_url.scheme() == "https" && key_required {
+            api_key
+        } else {
+            None
+        },
+        system_prompt,
+        user_prompt,
+    )?;
+
+    let started = Instant::now();
+    let response = match client.execute(request).await {
+        Ok(response) => response,
+        Err(error) => {
+            let code = if error.is_timeout() {
+                AiErrorCode::HttpTimeout
+            } else {
+                AiErrorCode::HttpRequest
+            };
+            let message = if error.is_timeout() {
+                "The AI analysis request timed out."
+            } else {
+                "The AI provider could not be reached for analysis."
+            };
+            return Ok(AnalysisAttempt::Failed {
+                code,
+                message: message.into(),
+                retryable: true,
+                latency_ms: elapsed_millis(started),
+            });
+        }
+    };
+
+    // Retry-After must be captured before the response is consumed by the
+    // bounded reader; it is a plain numeric seconds value, never sensitive.
+    let retry_after_secs = response
+        .headers()
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.trim().parse::<u64>().ok());
+
+    match read_bounded_response(response, started).await? {
+        ProviderAttempt::Response {
+            status,
+            body,
+            latency_ms,
+        } => Ok(AnalysisAttempt::Response {
+            status,
+            body,
+            retry_after_secs,
+            latency_ms,
+        }),
+        ProviderAttempt::Failed {
+            code,
+            message,
+            latency_ms,
+        } => Ok(AnalysisAttempt::Failed {
+            code,
+            message,
+            retryable: code == AiErrorCode::HttpTimeout || code == AiErrorCode::HttpRequest,
+            latency_ms,
+        }),
+    }
+}
+
 fn build_client(
     timeout_seconds: u32,
     loopback_http: bool,
@@ -166,6 +285,38 @@ fn build_request(
             AiErrorKind::Provider,
             AiErrorCode::HttpRequest,
             "Unable to create the AI provider request.",
+            false,
+        )
+    })
+}
+
+fn build_analysis_request(
+    client: &Client,
+    endpoint: Url,
+    config: &AiConfigInput,
+    api_key: Option<&str>,
+    system_prompt: &str,
+    user_prompt: &str,
+) -> Result<Request, AiCommandError> {
+    let mut request = client.post(endpoint).json(&json!({
+        "model": config.model,
+        "messages": [
+            { "role": "system", "content": system_prompt },
+            { "role": "user", "content": user_prompt }
+        ],
+        "max_tokens": MAX_ANALYSIS_OUTPUT_TOKENS,
+        "temperature": 0
+    }));
+    if let Some(api_key) = api_key {
+        request = request.header(AUTHORIZATION, format!("Bearer {api_key}"));
+    }
+    // Mirror build_request: never attach Cookie and never expose the builder
+    // in an error because either could carry authentication material.
+    request.build().map_err(|_| {
+        command_error(
+            AiErrorKind::Provider,
+            AiErrorCode::HttpRequest,
+            "Unable to create the AI analysis request.",
             false,
         )
     })
@@ -420,6 +571,30 @@ mod tests {
             request.headers().get(AUTHORIZATION).unwrap(),
             "Bearer placeholder-credential"
         );
+        assert!(request.headers().get(COOKIE).is_none());
+    }
+
+    #[test]
+    fn analysis_request_uses_frozen_prompt_shape_and_budget() {
+        let config = config("ollama", "http://127.0.0.1:11434/v1/".into());
+        let base = validate_base_url(&config.provider, &config.base_url).unwrap();
+        let client = build_client(2, true, None).unwrap();
+        let request = build_analysis_request(
+            &client,
+            base.join(CHAT_COMPLETIONS_PATH).unwrap(),
+            &config,
+            None,
+            "system-instructions",
+            "untrusted-document",
+        )
+        .unwrap();
+        let body: serde_json::Value =
+            serde_json::from_slice(request.body().unwrap().as_bytes().unwrap()).unwrap();
+        assert_eq!(body["max_tokens"], 2048);
+        assert_eq!(body["messages"][0]["role"], "system");
+        assert_eq!(body["messages"][0]["content"], "system-instructions");
+        assert_eq!(body["messages"][1]["role"], "user");
+        assert_eq!(body["messages"][1]["content"], "untrusted-document");
         assert!(request.headers().get(COOKIE).is_none());
     }
 
