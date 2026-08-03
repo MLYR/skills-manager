@@ -13,6 +13,7 @@ import {
   listAiAnalysisBatches,
   listAiAnalysisJobs,
   listAiAnalysisLogs,
+  listAiAnalysisSummaries,
   pauseAiAnalysisBatch,
   previewAiAnalysis,
   resumeAiAnalysisBatch,
@@ -21,7 +22,6 @@ import {
   type AiBatchDto,
   type AiJobDto,
   type AiLogDetailDto,
-  type AiLogSummaryDto,
   type AiQueueStatsDto,
   type AiTargetRef,
 } from "../lib/tauri";
@@ -35,8 +35,11 @@ export function AiAnalysisManager() {
   const [batches, setBatches] = useState<AiBatchDto[]>([]);
   const [selectedBatchId, setSelectedBatchId] = useState<string | null>(null);
   const [jobs, setJobs] = useState<AiJobDto[]>([]);
-  const [logs, setLogs] = useState<AiLogSummaryDto[]>([]);
-  const [selectedLog, setSelectedLog] = useState<AiLogDetailDto | null>(null);
+  const [selectedJobId, setSelectedJobId] = useState<string | null>(null);
+  const [jobLogs, setJobLogs] = useState<AiLogDetailDto[]>([]);
+  const [jobLogsLoading, setJobLogsLoading] = useState(false);
+  const [failedJobs, setFailedJobs] = useState<AiJobDto[]>([]);
+  const [failedJobsLoading, setFailedJobsLoading] = useState(false);
   const [loading, setLoading] = useState(true);
   const [preview, setPreview] = useState<AiAnalysisPreviewDto | null>(null);
   const [previewBusy, setPreviewBusy] = useState(false);
@@ -55,10 +58,46 @@ export function AiAnalysisManager() {
       .catch((error) => toast.error(aiErrorMessage(error)));
   }, []);
 
-  const loadLogs = useCallback(() => {
-    listAiAnalysisLogs({ limit: 100 })
-      .then((page) => setLogs(page.items))
-      .catch((error) => toast.error(aiErrorMessage(error)));
+  const loadFailedJobs = useCallback(async () => {
+    setFailedJobsLoading(true);
+    try {
+      const allFailed: AiJobDto[] = [];
+      let cursor: string | null = null;
+      do {
+        const page = await listAiAnalysisJobs({ status: "failed", cursor, limit: 100 });
+        allFailed.push(...page.items);
+        cursor = page.next_cursor;
+      } while (cursor && allFailed.length < 1000);
+
+      // A failed historical job can be superseded by a later success. Recheck
+      // target status so the one-click action never charges for a fresh result.
+      const uniqueTargets = Array.from(
+        new Map(allFailed.map((job) => [JSON.stringify(job.target), job.target])).values(),
+      );
+      if (uniqueTargets.length === 0) {
+        setFailedJobs([]);
+        return;
+      }
+      const summaries = await listAiAnalysisSummaries({ targets: uniqueTargets });
+      const failedKeys = new Set(
+        summaries
+          .filter((summary) => summary.status === "failed")
+          .map((summary) => JSON.stringify(summary.target)),
+      );
+      const seen = new Set<string>();
+      setFailedJobs(
+        allFailed.filter((job) => {
+          const key = JSON.stringify(job.target);
+          if (!failedKeys.has(key) || seen.has(key)) return false;
+          seen.add(key);
+          return true;
+        }),
+      );
+    } catch (error) {
+      toast.error(aiErrorMessage(error));
+    } finally {
+      setFailedJobsLoading(false);
+    }
   }, []);
 
   const refresh = useCallback(() => {
@@ -76,30 +115,65 @@ export function AiAnalysisManager() {
         if (requestId === requestRef.current) setLoading(false);
     });
     loadBatches();
-  }, [loadBatches]);
+    void loadFailedJobs();
+  }, [loadBatches, loadFailedJobs]);
 
   useEffect(() => {
     refresh();
-    loadLogs();
     // Real backend state only: the fast interval re-reads batches/jobs, never
     // the full filesystem-backed stats scan, and never fabricates progress.
     const timer = window.setInterval(loadBatches, 2_000);
-    return () => window.clearInterval(timer);
-  }, [refresh, loadBatches, loadLogs]);
-
-  useEffect(() => {
-    loadLogs();
-  }, [loadLogs]);
+    // Filesystem statistics are best-effort; do not leave a permanent loading
+    // indicator if a large or unavailable workspace scan takes too long.
+    const statsFallback = window.setTimeout(() => setLoading(false), 3_000);
+    return () => {
+      window.clearInterval(timer);
+      window.clearTimeout(statsFallback);
+    };
+  }, [refresh, loadBatches]);
 
   useEffect(() => {
     if (!selectedBatchId) {
       setJobs([]);
+      setSelectedJobId(null);
       return;
     }
     listAiAnalysisJobs({ batch_id: selectedBatchId, limit: 100 })
-      .then((page) => setJobs(page.items))
+      .then((page) => {
+        setJobs(page.items);
+        setSelectedJobId((current) =>
+          current && page.items.some((job) => job.id === current)
+            ? current
+            : page.items[0]?.id ?? null,
+        );
+      })
       .catch((error) => toast.error(aiErrorMessage(error)));
   }, [selectedBatchId, batches]);
+
+  useEffect(() => {
+    if (!selectedJobId) {
+      setJobLogs([]);
+      return;
+    }
+    let cancelled = false;
+    setJobLogsLoading(true);
+    listAiAnalysisLogs({ job_id: selectedJobId, limit: 100 })
+      .then(async (page) => {
+        return Promise.all(page.items.map((log) => getAiAnalysisLog({ log_id: log.id })));
+      })
+      .then((details) => {
+        if (!cancelled) setJobLogs(details.sort((a, b) => b.created_at - a.created_at));
+      })
+      .catch((error) => {
+        if (!cancelled) toast.error(aiErrorMessage(error));
+      })
+      .finally(() => {
+        if (!cancelled) setJobLogsLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedJobId]);
 
   const startBatchPreview = async () => {
     const targets: AiTargetRef[] = managedSkills.map((skill) => ({
@@ -112,6 +186,24 @@ export function AiAnalysisManager() {
     }
     try {
       const next = await previewAiAnalysis({ targets, mode: "missing_or_stale" });
+      setPreview(next);
+    } catch (error) {
+      toast.error(aiErrorMessage(error));
+    }
+  };
+
+  const startFailedPreview = async () => {
+    if (failedJobsLoading) return;
+    if (failedJobs.length === 0) {
+      toast.success(t("ai.manager.noFailedJobs"));
+      return;
+    }
+    try {
+      const next = await previewAiAnalysis({
+        targets: failedJobs.map((job) => job.target),
+        mode: "force",
+      });
+      setRetryJob(null);
       setPreview(next);
     } catch (error) {
       toast.error(aiErrorMessage(error));
@@ -152,20 +244,11 @@ export function AiAnalysisManager() {
     }
   };
 
-  const openLog = async (logId: string) => {
-    try {
-      setSelectedLog(await getAiAnalysisLog({ log_id: logId }));
-    } catch (error) {
-      toast.error(aiErrorMessage(error));
-    }
-  };
-
   const handleClearLogs = async () => {
     try {
       const result = await clearAiAnalysisLogs();
       toast.success(t("ai.logs.cleared", { count: result.deleted_count }));
-      setSelectedLog(null);
-      loadLogs();
+      setJobLogs([]);
     } catch (error) {
       toast.error(aiErrorMessage(error));
     }
@@ -187,9 +270,14 @@ export function AiAnalysisManager() {
     }
   };
 
-  if (loading && !stats) {
-    return <div className="mt-20 text-center text-[13px] text-muted">{t("common.loading")}</div>;
-  }
+  const selectedJob = jobs.find((job) => job.id === selectedJobId) ?? null;
+  const requestLog =
+    jobLogs.find((log) => log.event_kind === "request_started" || log.event_kind === "correction_requested") ??
+    null;
+  const responseLog =
+    jobLogs.find((log) =>
+      ["response_received", "request_failed", "retry_scheduled", "cancelled"].includes(log.event_kind),
+    ) ?? null;
 
   return (
     <div className="space-y-6 p-6">
@@ -198,17 +286,28 @@ export function AiAnalysisManager() {
           <h1 className="text-[18px] font-semibold text-primary">{t("ai.manager.title")}</h1>
           <p className="mt-0.5 text-[12.5px] text-muted">{t("ai.manager.subtitle")}</p>
         </div>
-        <button
-          type="button"
-          onClick={startBatchPreview}
-          className="inline-flex items-center gap-1.5 rounded-lg bg-accent px-3 py-1.5 text-[13px] font-medium text-white transition-colors hover:bg-accent-dark"
-        >
-          <Plus className="h-3.5 w-3.5" />
-          {t("ai.manager.newBatch")}
-        </button>
+        <div className="flex flex-wrap items-center justify-end gap-2">
+          <button
+            type="button"
+            onClick={startFailedPreview}
+            disabled={failedJobsLoading || failedJobs.length === 0}
+            className="inline-flex items-center gap-1.5 rounded-lg border border-border-subtle bg-surface px-3 py-1.5 text-[13px] font-medium text-secondary transition-colors hover:bg-surface-hover disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            <RotateCcw className="h-3.5 w-3.5" />
+            {t("ai.manager.retryFailed", { count: failedJobs.length })}
+          </button>
+          <button
+            type="button"
+            onClick={startBatchPreview}
+            className="inline-flex items-center gap-1.5 rounded-lg bg-accent px-3 py-1.5 text-[13px] font-medium text-white transition-colors hover:bg-accent-dark"
+          >
+            <Plus className="h-3.5 w-3.5" />
+            {t("ai.manager.newBatch")}
+          </button>
+        </div>
       </div>
 
-      {stats && (
+      {stats ? (
         <div className="grid grid-cols-2 gap-2 md:grid-cols-4 lg:grid-cols-7">
           {[
             { label: t("ai.manager.statTotal"), value: stats.targets_total },
@@ -225,8 +324,13 @@ export function AiAnalysisManager() {
             </div>
           ))}
         </div>
+      ) : (
+        <div className="rounded-xl border border-border-subtle bg-surface/50 px-3 py-2 text-[12px] text-muted">
+          {loading ? t("ai.manager.statsLoading") : t("ai.manager.statsUnavailable")}
+        </div>
       )}
 
+      <div className="grid gap-4 lg:grid-cols-[minmax(260px,0.9fr)_minmax(0,1.5fr)]">
       <section className="rounded-xl border border-border-subtle bg-surface/70">
         <div className="border-b border-border-subtle px-4 py-3 text-[13px] font-semibold text-secondary">
           {t("ai.manager.batches")}
@@ -242,10 +346,14 @@ export function AiAnalysisManager() {
                   ? Math.round((batch.progress_completed / batch.progress_total) * 100)
                   : 0;
               return (
-                <button
+                <div
                   key={batch.id}
-                  type="button"
+                  role="button"
+                  tabIndex={0}
                   onClick={() => setSelectedBatchId(batch.id)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter" || event.key === " ") setSelectedBatchId(batch.id);
+                  }}
                   className={`flex w-full items-center gap-3 border-b border-border-subtle px-4 py-2.5 text-left last:border-b-0 ${
                     active ? "bg-surface-hover" : "hover:bg-surface-hover/50"
                   }`}
@@ -260,9 +368,17 @@ export function AiAnalysisManager() {
                     <div className="mt-1 h-1.5 overflow-hidden rounded-full bg-bg-secondary">
                       <div className="h-full bg-accent" style={{ width: `${progress}%` }} />
                     </div>
-                    <div className="mt-0.5 text-[11px] text-faint">
-                      {batch.progress_completed}/{batch.progress_total} · {t("ai.manager.attempts")}:{" "}
-                      {batch.jobs_succeeded + batch.jobs_failed + batch.jobs_cancelled}
+                    <div className="mt-1 flex flex-wrap gap-x-2 text-[11px] text-faint">
+                      <span>{batch.progress_completed}/{batch.progress_total}</span>
+                      <span className="text-green-600 dark:text-green-400">
+                        {t("ai.manager.succeededCount", { count: batch.jobs_succeeded })}
+                      </span>
+                      <span className={batch.jobs_failed > 0 ? "text-red-500" : "text-faint"}>
+                        {t("ai.manager.failedCount", { count: batch.jobs_failed })}
+                      </span>
+                      {batch.jobs_cancelled > 0 ? (
+                        <span>{t("ai.manager.cancelledCount", { count: batch.jobs_cancelled })}</span>
+                      ) : null}
                     </div>
                   </div>
                   <div className="flex shrink-0 items-center gap-1" onClick={(event) => event.stopPropagation()}>
@@ -297,7 +413,7 @@ export function AiAnalysisManager() {
                       </button>
                     ) : null}
                   </div>
-                </button>
+                </div>
               );
             })
           )}
@@ -315,7 +431,15 @@ export function AiAnalysisManager() {
             {jobs.map((job) => (
               <div
                 key={job.id}
-                className="flex items-center gap-3 border-b border-border-subtle px-4 py-2.5 text-[12.5px] last:border-b-0"
+                role="button"
+                tabIndex={0}
+                onClick={() => setSelectedJobId(job.id)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" || event.key === " ") setSelectedJobId(job.id);
+                }}
+                className={`flex items-center gap-3 border-b border-border-subtle px-4 py-2.5 text-[12.5px] last:border-b-0 ${
+                  selectedJobId === job.id ? "bg-surface-hover" : "hover:bg-surface-hover/50"
+                }`}
               >
                 <span className="min-w-0 flex-1 truncate text-secondary">{job.skill_name}</span>
                 <span className="shrink-0 rounded-full bg-surface-hover px-2 py-0.5 text-[11px] text-muted">
@@ -324,12 +448,12 @@ export function AiAnalysisManager() {
                 <span className="shrink-0 text-[11px] text-faint">
                   {job.attempt_count}/3
                 </span>
-                {job.error_message && (
-                  <span className="hidden shrink-0 max-w-[220px] truncate text-[11px] text-red-500 lg:inline">
+                {job.error_message && (job.status === "failed" || job.status === "retry_wait") && (
+                  <span className="hidden max-w-[220px] shrink-0 truncate text-[11px] text-red-500 lg:inline">
                     {job.error_message}
                   </span>
                 )}
-                <div className="flex shrink-0 items-center gap-1">
+                <div className="flex shrink-0 items-center gap-1" onClick={(event) => event.stopPropagation()}>
                   {job.status === "queued" || job.status === "retry_wait" || job.status === "interrupted" ? (
                     <button
                       type="button"
@@ -356,6 +480,7 @@ export function AiAnalysisManager() {
           </div>
         )}
       </section>
+      </div>
 
       <section className="rounded-xl border border-border-subtle bg-surface/70">
         <div className="flex items-center justify-between border-b border-border-subtle px-4 py-3">
@@ -368,54 +493,35 @@ export function AiAnalysisManager() {
             {t("ai.logs.clear")}
           </button>
         </div>
-        {logs.length === 0 ? (
+        {!selectedJobId ? (
+          <div className="px-4 py-8 text-center text-[12.5px] text-muted">{t("ai.logs.selectTask")}</div>
+        ) : jobLogsLoading ? (
+          <div className="px-4 py-8 text-center text-[12.5px] text-muted">{t("ai.logs.loading")}</div>
+        ) : jobLogs.length === 0 ? (
           <div className="px-4 py-8 text-center text-[12.5px] text-muted">{t("ai.logs.empty")}</div>
         ) : (
-          <div className="max-h-64 overflow-y-auto">
-            {logs.map((log) => (
-              <button
-                key={log.id}
-                type="button"
-                onClick={() => openLog(log.id)}
-                className="flex w-full items-center gap-3 border-b border-border-subtle px-4 py-2 text-left text-[12px] last:border-b-0 hover:bg-surface-hover/50"
-              >
-                <span className="shrink-0 rounded-full bg-surface-hover px-2 py-0.5 text-[11px] text-muted">
-                  {log.event_kind}
+          <div className="space-y-3 px-4 py-3">
+            <div className="flex items-center justify-between text-[12px] font-semibold text-secondary">
+              <span>{selectedJob?.skill_name ?? selectedJobId.slice(0, 8)}</span>
+              <span className="text-[11px] font-normal text-faint">{t("ai.logs.detail")}</span>
+            </div>
+            <div className="grid gap-3 md:grid-cols-2">
+              <LogPane
+                title={t("ai.logs.request")}
+                content={requestLog ? [requestLog.request_system_prompt, requestLog.request_user_prompt].filter(Boolean).join("\n\n") : null}
+              />
+              <LogPane
+                title={t("ai.logs.response")}
+                content={responseLog ? [responseLog.raw_response, responseLog.error_message].filter(Boolean).join("\n\n") : null}
+              />
+            </div>
+            <div className="flex flex-wrap gap-2 text-[11px] text-faint">
+              {jobLogs.map((log) => (
+                <span key={log.id} className="rounded-full bg-surface-hover px-2 py-0.5">
+                  {log.event_kind} · {new Date(log.created_at).toLocaleTimeString()}
                 </span>
-                <span className="min-w-0 flex-1 truncate text-muted">
-                  {log.error_code || (log.target ? log.target.kind : "") || log.id.slice(0, 8)}
-                </span>
-                <span className="shrink-0 text-[11px] text-faint">
-                  {new Date(log.created_at).toLocaleTimeString()}
-                </span>
-              </button>
-            ))}
-          </div>
-        )}
-        {selectedLog && (
-          <div className="space-y-3 border-t border-border-subtle px-4 py-3">
-            <div className="text-[12px] font-semibold text-secondary">{t("ai.logs.detail")}</div>
-            {selectedLog.request_user_prompt && (
-              <div>
-                <div className="mb-1 text-[11px] font-medium text-faint">{t("ai.logs.userPrompt")}</div>
-                <pre className="max-h-40 overflow-y-auto whitespace-pre-wrap rounded bg-bg-secondary p-2 text-[11.5px] leading-[16px] text-muted">
-                  {selectedLog.request_user_prompt}
-                </pre>
-              </div>
-            )}
-            {selectedLog.raw_response && (
-              <div>
-                <div className="mb-1 text-[11px] font-medium text-faint">{t("ai.logs.response")}</div>
-                <pre className="max-h-40 overflow-y-auto whitespace-pre-wrap rounded bg-bg-secondary p-2 text-[11.5px] leading-[16px] text-muted">
-                  {selectedLog.raw_response}
-                </pre>
-              </div>
-            )}
-            {selectedLog.error_message && (
-              <div className="rounded bg-red-500/8 px-2 py-1.5 text-[12px] text-red-500">
-                {selectedLog.error_message}
-              </div>
-            )}
+              ))}
+            </div>
           </div>
         )}
       </section>
@@ -441,6 +547,17 @@ function batchStatusLabel(t: (key: string) => string, status: AiBatchDto["status
 function jobStatusLabel(t: (key: string) => string, status: AiJobDto["status"]) {
   const key = `ai.jobStatus.${status}`;
   return t(key);
+}
+
+function LogPane({ title, content }: { title: string; content: string | null }) {
+  return (
+    <div className="min-w-0">
+      <div className="mb-1 text-[11px] font-medium text-faint">{title}</div>
+      <pre className="max-h-64 min-h-28 overflow-y-auto whitespace-pre-wrap rounded bg-bg-secondary p-2 text-[11.5px] leading-[16px] text-muted">
+        {content || "—"}
+      </pre>
+    </div>
+  );
 }
 
 function aiErrorMessage(error: unknown) {

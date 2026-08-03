@@ -42,10 +42,19 @@ export function AiAnalysisPanel({ target }: Props) {
         if (requestId === requestRef.current) setLoading(false);
       });
   }, [target]);
+  const activeJobId = detail?.active_job?.id;
 
   useEffect(() => {
     load();
   }, [load]);
+
+  useEffect(() => {
+    if (!activeJobId) return;
+    // Queue state is persisted in Rust, so polling only re-reads the real
+    // record and stops as soon as the terminal result has been committed.
+    const timer = window.setInterval(load, 2_000);
+    return () => window.clearInterval(timer);
+  }, [activeJobId, load]);
 
   const startPreview = async () => {
     try {
@@ -109,7 +118,8 @@ export function AiAnalysisPanel({ target }: Props) {
         </button>
       </div>
 
-      {detail?.last_error && (
+      {/* A historical failed attempt must not mask a later successful result. */}
+      {detail?.last_error && status === "failed" && (
         <div className="rounded-lg border border-red-500/25 bg-red-500/8 px-3 py-2 text-[12.5px] text-red-600 dark:text-red-400">
           {detail.last_error.message}
         </div>

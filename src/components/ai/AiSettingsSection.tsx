@@ -567,16 +567,29 @@ export function AiSettingsSection() {
               </div>
 
               <div className="flex flex-wrap items-center gap-2">
-                <input
-                  ref={apiKeyInputRef}
-                  type="password"
-                  autoComplete="new-password"
-                  spellCheck={false}
-                  disabled={isBusy}
-                  aria-label={t("settings.ai.apiKeyInputLabel")}
-                  placeholder={hasApiKey ? t("settings.ai.apiKeyReplacePlaceholder") : t("settings.ai.apiKeyPlaceholder")}
-                  className={`${fieldClass} min-w-[220px] flex-1 font-mono`}
-                />
+                <div className="relative min-w-[220px] flex-1">
+                  <input
+                    ref={apiKeyInputRef}
+                    type="password"
+                    autoComplete="new-password"
+                    spellCheck={false}
+                    disabled={isBusy}
+                    aria-label={t("settings.ai.apiKeyInputLabel")}
+                    placeholder={hasApiKey ? t("settings.ai.apiKeyReplacePlaceholder") : t("settings.ai.apiKeyPlaceholder")}
+                    className={`${fieldClass} peer pr-32 font-mono`}
+                  />
+                  {hasApiKey && (
+                    // Show stored status inside the otherwise blank password field,
+                    // but hide it as soon as a replacement key is being entered.
+                    <span
+                      aria-hidden="true"
+                      className="pointer-events-none absolute inset-y-0 right-2 hidden items-center gap-1 text-[11px] font-medium text-emerald-600 peer-placeholder-shown:flex dark:text-emerald-400"
+                    >
+                      <ShieldCheck className="h-3.5 w-3.5" />
+                      {t("settings.ai.apiKeyInputStoredHint")}
+                    </span>
+                  )}
+                </div>
                 <button
                   type="button"
                   onClick={() => void handleSaveApiKey()}

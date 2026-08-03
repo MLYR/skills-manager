@@ -38,6 +38,7 @@ import { MultiSelectToolbar } from "../components/MultiSelectToolbar";
 import { BatchTagDialog } from "../components/BatchTagDialog";
 import { SyncDots } from "../components/SyncDots";
 import { AiSummaryText } from "../components/ai/AiSummaryText";
+import { AiAnalysisStatusBadge } from "../components/ai/AiAnalysisStatusBadge";
 import * as api from "../lib/tauri";
 import { getTagActiveColor, getTagColor, UNTAGGED_FILTER } from "../lib/skillTags";
 import type {
@@ -55,7 +56,6 @@ import {
   PointerSensor,
   useSensor,
   useSensors,
-  type DragEndEvent,
 } from "@dnd-kit/core";
 import {
   SortableContext,
@@ -131,6 +131,18 @@ export function MySkills() {
     projects,
     refreshProjects,
   } = useApp();
+  const closeDetailOnLeaveRef = useRef(closeSkillDetail);
+
+  useEffect(() => {
+    closeDetailOnLeaveRef.current = closeSkillDetail;
+  }, [closeSkillDetail]);
+
+  useEffect(() => {
+    // The selected detail lives in shared state, so clear it when this route
+    // unmounts instead of reopening an old sheet after returning from Settings.
+    return () => closeDetailOnLeaveRef.current();
+  }, []);
+
   const [viewMode, setViewMode] = useState<"grid" | "list">("grid");
   const [filterMode, setFilterMode] = useState<"all" | "enabled" | "available">("all");
   const [sourceFilters, setSourceFilters] = useState<Set<string>>(new Set());
@@ -163,18 +175,7 @@ export function MySkills() {
   const [tagInput, setTagInput] = useState("");
   const tagInputRef = useRef<HTMLInputElement>(null);
 
-  const [presetSkillOrder, setPresetSkillOrder] = useState<string[]>([]);
-
   const viewedPresetName = viewedPreset?.name || t("mySkills.currentPresetFallback");
-
-  // Fetch sort order whenever active preset changes
-  useEffect(() => {
-    if (!viewedPreset) {
-      setPresetSkillOrder([]);
-      return;
-    }
-    api.getPresetSkillOrder(viewedPreset.id).then(setPresetSkillOrder).catch(() => {});
-  }, [viewedPreset, skills]);
 
   // Skills with an unresolved sync conflict get a "needs attention" badge
   // that jumps to the Backup page (merge-engine design §4 UI).
@@ -289,24 +290,16 @@ export function MySkills() {
       return true;
     });
 
-    // Always sort enabled skills first; within enabled group, use custom sort order
-    if (viewedPreset) {
-      result.sort((a, b) => {
-        const aEnabled = a.preset_ids.includes(viewedPreset.id) ? 0 : 1;
-        const bEnabled = b.preset_ids.includes(viewedPreset.id) ? 0 : 1;
-        if (aEnabled !== bEnabled) return aEnabled - bEnabled;
-        // Within same group, use preset sort order
-        const aOrder = presetSkillOrder.indexOf(a.id);
-        const bOrder = presetSkillOrder.indexOf(b.id);
-        if (aOrder !== -1 && bOrder !== -1) return aOrder - bOrder;
-        if (aOrder !== -1) return -1;
-        if (bOrder !== -1) return 1;
-        return a.name.localeCompare(b.name);
-      });
-    }
+    // Keep every Skills view predictable: display names, not preset state or
+    // persisted drag order, determine the visible alphabetical order.
+    result.sort((a, b) => {
+      const aName = skillDisplayNames.get(a.id) || a.name;
+      const bName = skillDisplayNames.get(b.id) || b.name;
+      return aName.localeCompare(bName, undefined, { sensitivity: "base" }) || a.id.localeCompare(b.id);
+    });
 
     return result;
-  }, [skills, skillDisplayNames, aiSummaries, search, sourceFilters, tagFilters, filterMode, viewedPreset, presetSkillOrder]);
+  }, [skills, skillDisplayNames, aiSummaries, search, sourceFilters, tagFilters, filterMode, viewedPreset]);
 
   const summaryFor = (skillId: string): AiAnalysisSummaryDto | null => {
     const summary = aiSummaries[skillId];
@@ -341,35 +334,8 @@ export function MySkills() {
     useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
   );
 
-  const handleDragEnd = useCallback(
-    async (event: DragEndEvent) => {
-      const { active, over } = event;
-      if (!over || active.id === over.id || !viewedPreset) return;
-
-      // Only reorder enabled skills (they are always at the front)
-      const enabledSkills = filtered.filter((s) => s.preset_ids.includes(viewedPreset.id));
-      const oldIndex = enabledSkills.findIndex((s) => s.id === active.id);
-      const newIndex = enabledSkills.findIndex((s) => s.id === over.id);
-      if (oldIndex === -1 || newIndex === -1) return;
-
-      const reordered = [...enabledSkills];
-      const [moved] = reordered.splice(oldIndex, 1);
-      reordered.splice(newIndex, 0, moved);
-
-      // Optimistic update
-      setPresetSkillOrder(reordered.map((s) => s.id));
-
-      try {
-        await api.reorderPresetSkills(viewedPreset.id, reordered.map((s) => s.id));
-      } catch {
-        // Revert on failure
-        await api.getPresetSkillOrder(viewedPreset.id).then(setPresetSkillOrder).catch(() => {});
-      }
-    },
-    [filtered, viewedPreset]
-  );
-
-  const canDrag = !!viewedPreset;
+  // Reordering would immediately be superseded by the required alphabetical display order.
+  const canDrag = false;
 
   const refreshGitStatus = useCallback(async () => {
     try {
@@ -1200,7 +1166,7 @@ export function MySkills() {
           </p>
         </div>
       ) : (
-        <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
+        <DndContext sensors={sensors} collisionDetection={closestCenter}>
           <SortableContext
             items={filtered.map((s) => s.id)}
             strategy={viewMode === "grid" ? rectSortingStrategy : verticalListSortingStrategy}
@@ -1222,6 +1188,7 @@ export function MySkills() {
               skill.update_status === "source_missing"
               && (skill.source_type === "local" || skill.source_type === "import");
             const displayName = skillDisplayNames.get(skill.id) || skill.name;
+            const aiStatus = aiSummaries[skill.id]?.status ?? "unparsed";
 
             if (viewMode === "grid") {
               return (
@@ -1234,7 +1201,9 @@ export function MySkills() {
                 {(dragHandle) => (
                 <div
                   className={cn(
-                    "app-panel group relative flex h-full cursor-pointer flex-col transition-all hover:border-border hover:bg-surface-hover",
+                    // Grid items must be allowed to shrink; otherwise long
+                    // CJK/URL-like text expands the item past its column.
+                    "app-panel group relative flex h-full min-w-0 cursor-pointer flex-col overflow-hidden transition-all hover:border-border hover:bg-surface-hover",
                     enabledInPreset && "border-l-2 border-l-accent",
                     isMultiSelect && selectedIds.has(skill.id) && "ring-1 ring-accent border-accent/40"
                   )}
@@ -1274,31 +1243,35 @@ export function MySkills() {
                     </div>
                   )}
 
-                  <div className="flex items-center gap-2.5 px-3.5 pr-20 pt-3 pb-1.5">
+                  <div className="flex min-w-0 items-center gap-2.5 px-3.5 pr-20 pt-3 pb-1.5">
                     {isMultiSelect && (
                       selectedIds.has(skill.id)
                         ? <SquareCheck className="h-3.5 w-3.5 shrink-0 text-accent" />
                         : <Square className="h-3.5 w-3.5 shrink-0 text-faint" />
                     )}
                     <h3
-                      className="flex-1 truncate text-[14px] font-semibold text-primary group-hover:text-accent-light"
+                      className="min-w-0 flex-1 truncate text-[14px] font-semibold text-primary group-hover:text-accent-light"
                       title={displayName}
                     >
                       {displayName}
                     </h3>
                   </div>
 
-                  <div className="px-3.5 pb-3">
+                  <div className="min-w-0 overflow-hidden px-3.5 pb-3">
                     {(() => {
                       const summary = summaryFor(skill.id);
                       return summary ? (
                         <AiSummaryText
                           oneLine={summary.one_line}
                           stale={summary.is_stale}
-                          className="text-[13px] leading-[18px] text-muted"
+                          multiline
+                          className="w-full text-[13px] leading-[18px] text-muted"
                         />
                       ) : (
-                        <p className="text-[13px] leading-[18px] text-muted truncate">
+                        <p
+                          className="line-clamp-2 min-w-0 break-words text-[13px] leading-[18px] text-muted"
+                          title={skill.description || "—"}
+                        >
                           {skill.description || "—"}
                         </p>
                       );
@@ -1430,6 +1403,8 @@ export function MySkills() {
                       )}
                     </div>
                     <div className="flex items-center gap-2 shrink-0">
+                      {/* Keep the AI state with persistent card metadata so the content area stays focused on the summary. */}
+                      <AiAnalysisStatusBadge status={aiStatus} />
                       <SyncDots
                         skill={skill}
                         tools={tools}
@@ -1523,6 +1498,8 @@ export function MySkills() {
                 </div>
 
                 <div className="flex shrink-0 items-center gap-2.5">
+                  {/* List rows have no footer; this trailing metadata region is their compact equivalent. */}
+                  <AiAnalysisStatusBadge status={aiStatus} />
                   {conflictIds.has(skill.id) && (
                     <button
                       onClick={(e) => { e.stopPropagation(); navigate("/backup"); }}
