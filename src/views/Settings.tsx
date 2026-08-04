@@ -82,6 +82,18 @@ const MAINSTREAM_AGENT_KEYS = new Set([
   "amp",
 ]);
 
+const SETTINGS_SECTION_IDS = [
+  "agents",
+  "global-config",
+  "ai",
+  "proxy",
+  "auto-update",
+  "git-sync",
+  "about",
+] as const;
+
+type SettingsSectionId = (typeof SETTINGS_SECTION_IDS)[number];
+
 function compactHomePath(path: string) {
   return path
     .replace(/\/Users\/[^/]+/, "~")
@@ -212,8 +224,48 @@ export function Settings() {
   const [customProjectPath, setCustomProjectPath] = useState("");
   const [addingCustom, setAddingCustom] = useState(false);
   const [showMoreAgents, setShowMoreAgents] = useState(false);
+  const [activeSection, setActiveSection] = useState<SettingsSectionId>("agents");
 
   const GITHUB_URL = "https://github.com/xingkongliang/skills-manager";
+
+  const settingsNavigation = [
+    { id: "agents" as const, label: t("settings.builtInAgents") },
+    { id: "global-config" as const, label: t("settings.globalConfig") },
+    { id: "ai" as const, label: t("settings.ai.title") },
+    { id: "proxy" as const, label: t("settings.proxyConfig") },
+    { id: "auto-update" as const, label: t("settings.autoUpdate.title") },
+    { id: "git-sync" as const, label: t("settings.gitSyncConfig") },
+    { id: "about" as const, label: t("settings.about") },
+  ];
+
+  const scrollToSettingsSection = useCallback((sectionId: SettingsSectionId) => {
+    // 稳定锚点不依赖翻译后的标题文本，确保语言切换后仍能准确定位设置分区。
+    setActiveSection(sectionId);
+    document.getElementById(sectionId)?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }, []);
+
+  useEffect(() => {
+    const sections = SETTINGS_SECTION_IDS
+      .map((sectionId) => document.getElementById(sectionId))
+      .filter((section): section is HTMLElement => section !== null);
+    if (sections.length === 0) return;
+
+    // 使用真实滚动位置同步高亮，避免导航状态与长分区内容脱节。
+    const observer = new IntersectionObserver(
+      (entries) => {
+        const visibleSection = entries
+          .filter((entry) => entry.isIntersecting)
+          .sort((a, b) => a.boundingClientRect.top - b.boundingClientRect.top)[0];
+        if (visibleSection) {
+          setActiveSection(visibleSection.target.id as SettingsSectionId);
+        }
+      },
+      { rootMargin: "-24px 0px -70% 0px", threshold: [0, 0.1] }
+    );
+
+    sections.forEach((section) => observer.observe(section));
+    return () => observer.disconnect();
+  }, []);
 
   const startEditPath = useCallback((key: string, currentPath: string) => {
     setEditingPathKey(key);
@@ -1068,9 +1120,39 @@ export function Settings() {
         </h1>
       </div>
 
-      <div className="space-y-6">
+      <div className="flex flex-col gap-6 lg:flex-row lg:items-start lg:gap-8">
+        <aside className="lg:sticky lg:top-1 lg:w-44 lg:shrink-0 lg:-translate-x-6">
+          <nav
+            aria-label={t("settings.title")}
+            className="app-panel flex gap-1 overflow-x-auto p-1.5 lg:block lg:overflow-visible"
+          >
+            <p className="hidden px-2 py-1.5 text-[11px] font-semibold uppercase tracking-[0.08em] text-faint lg:block">
+              {t("settings.title")}
+            </p>
+            <div className="flex shrink-0 gap-1 lg:block lg:space-y-0.5">
+              {settingsNavigation.map((item) => (
+                <button
+                  key={item.id}
+                  type="button"
+                  aria-current={activeSection === item.id ? "location" : undefined}
+                  onClick={() => scrollToSettingsSection(item.id)}
+                  className={cn(
+                    "flex shrink-0 items-center rounded-lg px-2.5 py-2 text-left text-[12px] font-medium whitespace-nowrap outline-none transition-colors focus-visible:ring-1 focus-visible:ring-accent lg:w-full",
+                    activeSection === item.id
+                      ? "bg-accent-bg text-accent"
+                      : "text-muted hover:bg-surface-hover hover:text-secondary"
+                  )}
+                >
+                  {item.label}
+                </button>
+              ))}
+            </div>
+          </nav>
+        </aside>
+
+        <div className="min-w-0 flex-1 space-y-6">
         {/* Agent status */}
-        <section>
+        <section id="agents" className="scroll-mt-4">
           <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
             <div>
               <h2 className="app-section-title">
@@ -1240,7 +1322,7 @@ export function Settings() {
         </section>
 
         {/* Global config */}
-        <section>
+        <section id="global-config" className="scroll-mt-4">
           <h2 className="app-section-title mb-3">
             {t("settings.globalConfig")}
           </h2>
@@ -1544,10 +1626,12 @@ export function Settings() {
         </section>
 
         {/* AI settings stay self-contained so credentials never enter the parent view state. */}
-        <AiSettingsSection />
+        <section id="ai" className="scroll-mt-4">
+          <AiSettingsSection />
+        </section>
 
         {/* Proxy config */}
-        <section>
+        <section id="proxy" className="scroll-mt-4">
           <h2 className="app-section-title mb-3">
             {t("settings.proxyConfig")}
           </h2>
@@ -1581,7 +1665,7 @@ export function Settings() {
         </section>
 
         {/* Skill auto-update */}
-        <section>
+        <section id="auto-update" className="scroll-mt-4">
           <h2 className="app-section-title mb-3">
             {t("settings.autoUpdate.title")}
           </h2>
@@ -1651,7 +1735,7 @@ export function Settings() {
         </section>
 
         {/* Git sync config */}
-        <section>
+        <section id="git-sync" className="scroll-mt-4">
           <h2 className="app-section-title mb-3">
             {t("settings.gitSyncConfig")}
           </h2>
@@ -1752,7 +1836,7 @@ export function Settings() {
         </section>
 
         {/* About */}
-        <section className="space-y-2">
+        <section id="about" className="space-y-2 scroll-mt-4">
           {repoWarnings.length > 0 && (
             <div className="app-panel flex flex-wrap items-start gap-2 p-3 border border-amber-500/40 bg-amber-500/10">
               <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5 text-amber-700 dark:text-amber-300" />
@@ -1905,6 +1989,7 @@ export function Settings() {
             </div>
           </div>
         </section>
+        </div>
       </div>
     </div>
   );
