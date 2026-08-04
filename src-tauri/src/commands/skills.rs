@@ -7,6 +7,7 @@ use tauri::State;
 use walkdir::WalkDir;
 
 use crate::core::{
+    ai::{preview::now_millis, repository::AiRepository, runner::AiRuntimeState},
     audit_log::AuditDraft,
     central_repo,
     error::AppError,
@@ -561,10 +562,16 @@ fn source_label_for_skill(skill: &SkillRecord) -> String {
 pub async fn delete_managed_skill(
     skill_id: String,
     store: State<'_, Arc<SkillStore>>,
+    ai_runtime: State<'_, Arc<AiRuntimeState>>,
 ) -> Result<(), AppError> {
     let store = store.inner().clone();
+    let ai_runtime = ai_runtime.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let result = delete_managed_skills_by_ids(&store, &[skill_id.clone()])?;
+        let result = delete_managed_skills_by_ids_with_runtime(
+            &store,
+            &[skill_id.clone()],
+            Some(ai_runtime.as_ref()),
+        )?;
         if result.deleted == 0 {
             return Err(AppError::not_found("Skill not found"));
         }
@@ -577,15 +584,27 @@ pub async fn delete_managed_skill(
 pub async fn delete_managed_skills(
     skill_ids: Vec<String>,
     store: State<'_, Arc<SkillStore>>,
+    ai_runtime: State<'_, Arc<AiRuntimeState>>,
 ) -> Result<BatchDeleteSkillsResult, AppError> {
     let store = store.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || delete_managed_skills_by_ids(&store, &skill_ids))
-        .await?
+    let ai_runtime = ai_runtime.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        delete_managed_skills_by_ids_with_runtime(&store, &skill_ids, Some(ai_runtime.as_ref()))
+    })
+    .await?
 }
 
 pub fn delete_managed_skills_by_ids(
     store: &SkillStore,
     skill_ids: &[String],
+) -> Result<BatchDeleteSkillsResult, AppError> {
+    delete_managed_skills_by_ids_with_runtime(store, skill_ids, None)
+}
+
+fn delete_managed_skills_by_ids_with_runtime(
+    store: &SkillStore,
+    skill_ids: &[String],
+    ai_runtime: Option<&AiRuntimeState>,
 ) -> Result<BatchDeleteSkillsResult, AppError> {
     sync_metadata::with_repo_lock("delete skills", || {
         let mut deleted = 0;
@@ -611,6 +630,14 @@ pub fn delete_managed_skills_by_ids(
             let central = PathBuf::from(&skill.central_path);
             if central.exists() {
                 std::fs::remove_dir_all(&central).ok();
+            }
+
+            let running_jobs =
+                AiRepository::new(store).remove_managed_target_data(skill_id, now_millis())?;
+            if let Some(ai_runtime) = ai_runtime {
+                for job_id in running_jobs {
+                    ai_runtime.request_cancel(&job_id);
+                }
             }
 
             store.delete_skill(skill_id)?;
@@ -2300,6 +2327,7 @@ fn remove_path_if_exists(path: &Path) -> Result<(), AppError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::ai::types::{AiAnalysisRecord, AiTargetKind};
     use std::fs;
     use tempfile::{tempdir, TempDir};
 
@@ -2360,6 +2388,30 @@ mod tests {
         }
     }
 
+    fn sample_ai_analysis(skill_id: &str) -> AiAnalysisRecord {
+        AiAnalysisRecord {
+            id: format!("analysis-{skill_id}"),
+            target_kind: AiTargetKind::Managed,
+            target_key: format!("[\"{skill_id}\"]"),
+            target_payload_json: format!("{{\"kind\":\"managed\",\"skill_id\":\"{skill_id}\"}}"),
+            skill_name: skill_id.to_string(),
+            source_hash: "hash".to_string(),
+            schema_version: 1,
+            prompt_version: "v1".to_string(),
+            output_language: "en".to_string(),
+            one_line: "Summary".to_string(),
+            result_json: "{}".to_string(),
+            provider: "custom".to_string(),
+            model: "model".to_string(),
+            input_tokens: Some(1),
+            output_tokens: Some(1),
+            total_tokens: Some(2),
+            analyzed_at: 1,
+            created_at: 1,
+            updated_at: 1,
+        }
+    }
+
     #[test]
     fn batch_delete_removes_skills_targets_and_stale_metadata_once() {
         let repo = test_repo();
@@ -2370,6 +2422,9 @@ mod tests {
             .unwrap();
         repo.store
             .insert_skill(&sample_skill("skill-2", "skill-two", &skill_two_dir))
+            .unwrap();
+        AiRepository::new(&repo.store)
+            .insert_analysis(&sample_ai_analysis("skill-1"))
             .unwrap();
 
         let target_dir = repo._tmp.path().join("target-skill-one");
@@ -2407,6 +2462,18 @@ mod tests {
         assert_eq!(result.failed, vec!["missing-skill".to_string()]);
         assert!(repo.store.get_skill_by_id("skill-1").unwrap().is_none());
         assert!(repo.store.get_skill_by_id("skill-2").unwrap().is_some());
+        let analysis_count: i64 = repo
+            .store
+            .with_ai_connection(|connection| {
+                connection.query_row(
+                    "SELECT COUNT(*) FROM skill_ai_analyses WHERE target_key='[\"skill-1\"]'",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(anyhow::Error::from)
+            })
+            .unwrap();
+        assert_eq!(analysis_count, 0);
         assert!(!skill_one_dir.exists());
         assert!(skill_two_dir.exists());
         assert!(!target_dir.exists());

@@ -460,3 +460,11 @@
 遗留风险：轻量扫描和完整扫描仍会读取本地文件；缓存为进程内缓存，手动刷新会强制重新校验。由于前端未启动/打包，本轮未做真实窗口计时；启动、构建、打包命令仍分别为`npm run dev`、`npm run build`、`npm run tauri:build`。
 
 验收结论：主会话自审通过，未改变AI目标身份、收费预览、任务状态机或原始Skill文件。
+
+## 17. 删除 Skill 时清理 AI 解读结果（2026-08-04，已完成）
+
+用户反馈：从技能库删除 Skill 后，原有 AI 解读仍可能留在数据库中。
+
+处理决策：中心 Skill 删除路径现在按规范化 `managed + skill_id` 清理 `skill_ai_analyses`；排队、重试等待和中断任务转为 `cancelled`，运行中任务同时写入持久取消标志并通知内存运行时，避免删除后继续提交结果。任务行保留为批次历史以维持混合批次计数和审计一致性；`ai_analysis_logs` 不在删除路径中处理，继续使用既有 30 天清理和一键清空策略。
+
+验收结果：新增 Repository 定向测试覆盖“成功结果 + 排队任务清理”和“运行任务取消标志”；`core::ai::repository` 19 passed、`commands::skills` 6 passed、`cargo check`通过、`git diff --check`通过。未启动/构建前端；启动、构建、打包命令仍分别为`npm run dev`、`npm run build`、`npm run tauri:build`。

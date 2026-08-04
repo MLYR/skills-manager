@@ -150,6 +150,68 @@ impl<'a> AiRepository<'a> {
             .with_ai_transaction(|transaction| insert_job(transaction, job))
     }
 
+    /// Remove the durable result for a managed Skill and cancel work that can
+    /// no longer resolve its document. Job rows stay as cancelled history so
+    /// mixed-target batches keep their original counters and audit trail.
+    pub(crate) fn remove_managed_target_data(
+        &self,
+        skill_id: &str,
+        now: i64,
+    ) -> Result<Vec<String>> {
+        let target = AiTargetRef::Managed {
+            skill_id: skill_id.to_string(),
+        };
+        let (target_kind, target_key, _) = canonical_target(&target);
+
+        self.store.with_ai_transaction(|transaction| {
+            let batch_ids: Vec<String> = {
+                let mut statement = transaction.prepare(
+                    "SELECT DISTINCT batch_id FROM ai_analysis_jobs
+                     WHERE target_kind=?1 AND target_key=?2",
+                )?;
+                let rows = statement
+                    .query_map(params![target_kind.as_str(), &target_key], |row| row.get(0))?;
+                rows.collect::<rusqlite::Result<Vec<String>>>()?
+            };
+            let running_job_ids: Vec<String> = {
+                let mut statement = transaction.prepare(
+                    "SELECT id FROM ai_analysis_jobs
+                     WHERE target_kind=?1 AND target_key=?2 AND status='running'",
+                )?;
+                let rows = statement
+                    .query_map(params![target_kind.as_str(), &target_key], |row| row.get(0))?;
+                rows.collect::<rusqlite::Result<Vec<String>>>()?
+            };
+
+            // Deleting the result first prevents a concurrent completion from
+            // leaving a visible analysis behind after the Skill is removed.
+            transaction.execute(
+                "DELETE FROM skill_ai_analyses WHERE target_kind=?1 AND target_key=?2",
+                params![target_kind.as_str(), &target_key],
+            )?;
+            transaction.execute(
+                "UPDATE ai_analysis_jobs
+                 SET status='cancelled', cancel_requested=1,
+                     finished_at=?1, updated_at=?1
+                 WHERE target_kind=?2 AND target_key=?3
+                   AND status IN ('queued','retry_wait','interrupted')",
+                params![now, target_kind.as_str(), &target_key],
+            )?;
+            // Running jobs remain visible until their in-flight request observes
+            // this flag; the command layer also signals the runtime cancel flag.
+            transaction.execute(
+                "UPDATE ai_analysis_jobs SET cancel_requested=1, updated_at=?1
+                 WHERE target_kind=?2 AND target_key=?3 AND status='running'",
+                params![now, target_kind.as_str(), &target_key],
+            )?;
+            for batch_id in batch_ids {
+                finalize_batch(transaction, &batch_id, now)?;
+            }
+
+            Ok(running_job_ids)
+        })
+    }
+
     /// Batch creation is all-or-nothing because a confirmed cost snapshot
     /// without its complete job set would misrepresent both progress and spend.
     pub fn insert_batch_with_jobs(
@@ -1540,6 +1602,80 @@ mod tests {
 
         repository.insert_analysis(&analysis("analysis-1")).unwrap();
         assert!(repository.insert_analysis(&analysis("analysis-2")).is_err());
+    }
+
+    #[test]
+    fn removing_managed_target_deletes_result_and_cancels_queued_job() {
+        let (_directory, store) = store();
+        let repository = AiRepository::new(&store);
+        repository
+            .insert_analysis(&analysis("analysis-delete"))
+            .unwrap();
+        repository
+            .insert_batch_with_jobs(
+                &batch("batch-delete", 1),
+                &[job("job-delete", "batch-delete", 0)],
+            )
+            .unwrap();
+
+        let running = repository
+            .remove_managed_target_data("skill-1", 50)
+            .unwrap();
+        assert!(running.is_empty());
+
+        store
+            .with_ai_connection(|connection| {
+                let analysis_count: i64 = connection.query_row(
+                    "SELECT COUNT(*) FROM skill_ai_analyses WHERE target_key='[\"skill-1\"]'",
+                    [],
+                    |row| row.get(0),
+                )?;
+                let job_state: (String, i64) = connection.query_row(
+                    "SELECT status,cancel_requested FROM ai_analysis_jobs WHERE id='job-delete'",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )?;
+                let batch_status: String = connection.query_row(
+                    "SELECT status FROM ai_analysis_batches WHERE id='batch-delete'",
+                    [],
+                    |row| row.get(0),
+                )?;
+                assert_eq!(analysis_count, 0);
+                assert_eq!(job_state, ("cancelled".to_string(), 1));
+                assert_eq!(batch_status, "completed");
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn removing_managed_target_flags_running_job_for_runtime_cancel() {
+        let (_directory, store) = store();
+        let repository = AiRepository::new(&store);
+        let mut running_batch = batch("batch-running-delete", 1);
+        running_batch.status = AiBatchStatus::Running;
+        let mut running_job = job("job-running-delete", "batch-running-delete", 0);
+        running_job.status = AiJobStatus::Running;
+        repository
+            .insert_batch_with_jobs(&running_batch, &[running_job])
+            .unwrap();
+
+        let running = repository
+            .remove_managed_target_data("skill-1", 75)
+            .unwrap();
+        assert_eq!(running, vec!["job-running-delete".to_string()]);
+
+        store
+            .with_ai_connection(|connection| {
+                let state: (String, i64) = connection.query_row(
+                    "SELECT status,cancel_requested FROM ai_analysis_jobs WHERE id='job-running-delete'",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )?;
+                assert_eq!(state, ("running".to_string(), 1));
+                Ok(())
+            })
+            .unwrap();
     }
 
     #[test]
