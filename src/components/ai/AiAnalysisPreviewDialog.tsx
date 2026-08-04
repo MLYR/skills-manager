@@ -6,12 +6,13 @@ import type { AiAnalysisPreviewDto } from "../../lib/tauri";
 interface Props {
   preview: AiAnalysisPreviewDto | null;
   busy: boolean;
+  analysisCounts?: { parsed: number; unparsed: number } | null;
   onClose: () => void;
   onConfirm: (previewId: string) => Promise<void>;
 }
 
 /** Cost/privacy confirmation before any billable analysis is enqueued. */
-export function AiAnalysisPreviewDialog({ preview, busy, onClose, onConfirm }: Props) {
+export function AiAnalysisPreviewDialog({ preview, busy, analysisCounts, onClose, onConfirm }: Props) {
   const { t } = useTranslation();
   const [expanded, setExpanded] = useState(false);
   if (!preview) return null;
@@ -47,11 +48,17 @@ export function AiAnalysisPreviewDialog({ preview, busy, onClose, onConfirm }: P
         </div>
 
         <div className="space-y-3 text-[13px] leading-[18px] text-secondary">
+          {analysisCounts ? (
+            <p className="rounded-lg border border-border-subtle bg-surface/70 px-3 py-2 text-[12px] text-muted">
+              {t("ai.preview.analysisCounts", analysisCounts)}
+            </p>
+          ) : null}
           <p>{t("ai.preview.scope", {
             total: preview.total_targets,
             valid: preview.valid_documents,
             missing: preview.missing_documents,
             unreadable: preview.unreadable_documents,
+            skipped: preview.skipped_targets,
           })}</p>
           <p>{t("ai.preview.usage", {
             characters: preview.total_characters,

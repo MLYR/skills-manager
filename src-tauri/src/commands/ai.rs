@@ -943,6 +943,17 @@ fn not_found_error(subject: &str) -> AiCommandError {
     )
 }
 
+fn mode_allows_status(mode: AiAnalysisMode, status: AiAnalysisStatus) -> bool {
+    match mode {
+        AiAnalysisMode::MissingOnly => status == AiAnalysisStatus::Unparsed,
+        AiAnalysisMode::StaleOnly => status == AiAnalysisStatus::Stale,
+        AiAnalysisMode::MissingOrStale => {
+            matches!(status, AiAnalysisStatus::Unparsed | AiAnalysisStatus::Stale)
+        }
+        AiAnalysisMode::Force => true,
+    }
+}
+
 fn build_preview(
     store: &SkillStore,
     state: &AiRuntimeState,
@@ -957,21 +968,48 @@ fn build_preview(
     let mut valid = 0_i64;
     let mut missing = 0_i64;
     let mut unreadable = 0_i64;
+    let mut skipped = 0_i64;
+    let repository = AiRepository::new(store);
 
     for target in targets {
         let (outcome, document) = collect_document(store, target);
         match outcome {
-            DocumentOutcome::Ready => valid += 1,
-            DocumentOutcome::NoDocument => missing += 1,
-            DocumentOutcome::Unreadable { .. } => unreadable += 1,
+            DocumentOutcome::Ready => {
+                let target_state = repository_result(repository.get_target_state(target))?;
+                let status = compute_status(
+                    &outcome,
+                    Some(config),
+                    &target_state,
+                    document.as_ref().map(|doc| doc.source_hash.as_str()),
+                );
+                let mut item = item_from_document(target.clone(), document, outcome);
+                if mode_allows_status(mode, status) {
+                    valid += 1;
+                    total_characters = total_characters.saturating_add(item.character_count);
+                    input_tokens = input_tokens.saturating_add(item.estimated_input_tokens);
+                    output_tokens = output_tokens.saturating_add(item.estimated_output_tokens);
+                } else {
+                    // Keep skipped targets visible in the preview, but remove
+                    // their content and usage so they cannot become paid jobs.
+                    item.content = None;
+                    item.character_count = 0;
+                    item.estimated_input_tokens = 0;
+                    item.estimated_output_tokens = 0;
+                    item.eligibility = AiPreviewEligibility::Skipped;
+                    item.error_code = None;
+                    skipped += 1;
+                }
+                items.push(item);
+            }
+            DocumentOutcome::NoDocument => {
+                missing += 1;
+                items.push(item_from_document(target.clone(), document, outcome));
+            }
+            DocumentOutcome::Unreadable { .. } => {
+                unreadable += 1;
+                items.push(item_from_document(target.clone(), document, outcome));
+            }
         }
-        let item = item_from_document(target.clone(), document, outcome);
-        if item.eligibility == AiPreviewEligibility::Ready {
-            total_characters = total_characters.saturating_add(item.character_count);
-            input_tokens = input_tokens.saturating_add(item.estimated_input_tokens);
-            output_tokens = output_tokens.saturating_add(item.estimated_output_tokens);
-        }
-        items.push(item);
     }
 
     let (cost, maximum_cost) = estimate_costs(input_tokens, output_tokens, config)?;
@@ -992,7 +1030,7 @@ fn build_preview(
         valid_documents: valid,
         missing_documents: missing,
         unreadable_documents: unreadable,
-        skipped_targets: 0,
+        skipped_targets: skipped,
     };
     let preview_id = register_preview(&state.previews, entry)?;
     let expires_at = now.saturating_add(PREVIEW_TTL_MILLIS);
@@ -1018,7 +1056,7 @@ fn build_preview(
         valid_documents: valid,
         missing_documents: missing,
         unreadable_documents: unreadable,
-        skipped_targets: 0,
+        skipped_targets: skipped,
         total_characters,
         estimated_input_tokens: input_tokens,
         estimated_output_tokens: output_tokens,
@@ -1042,8 +1080,16 @@ fn enqueue_preview(
     let entry = consume_preview(&state.previews, preview_id, now_millis())?;
     let repository = AiRepository::new(store);
     let mut jobs = Vec::new();
+    let mut input_tokens = 0_i64;
+    let mut output_tokens = 0_i64;
+    let mut skipped_targets = entry.skipped_targets;
 
-    for (ordinal, item) in entry.items.iter().enumerate() {
+    for item in &entry.items {
+        // Skipped preview items are informational only; never turn an already
+        // analyzed target back into a billable job during confirmation.
+        if item.eligibility != AiPreviewEligibility::Ready {
+            continue;
+        }
         let (outcome, document) = collect_document(store, &item.target);
         match (outcome, document) {
             (DocumentOutcome::Ready, Some(document)) => {
@@ -1054,11 +1100,29 @@ fn enqueue_preview(
                     return Err(content_changed_error());
                 }
                 let (kind, key, payload) = canonical_target(&item.target);
+                // Recheck the mode at confirmation time: another tab or an
+                // earlier batch may have created a result after the preview.
+                // This second gate prevents an already analyzed target from
+                // becoming a duplicate billable job during the race window.
+                let target_state =
+                    repository_result(repository.get_target_state_by_key(&kind, &key))?;
+                let current_status = compute_status(
+                    &DocumentOutcome::Ready,
+                    Some(&entry.config_snapshot),
+                    &target_state,
+                    Some(document.source_hash.as_str()),
+                );
+                if !mode_allows_status(entry.mode, current_status) {
+                    skipped_targets += 1;
+                    continue;
+                }
+                input_tokens = input_tokens.saturating_add(item.estimated_input_tokens);
+                output_tokens = output_tokens.saturating_add(item.estimated_output_tokens);
                 let now = now_millis();
                 jobs.push(AiJobRecord {
                     id: uuid::Uuid::new_v4().to_string(),
                     batch_id: String::new(), // filled after batch id is created
-                    ordinal: ordinal as i64,
+                    ordinal: jobs.len() as i64,
                     target_kind: kind,
                     target_key: key,
                     target_payload_json: payload,
@@ -1099,6 +1163,9 @@ fn enqueue_preview(
         ));
     }
 
+    let (estimated_cost_micros, estimated_max_retry_cost_micros) =
+        estimate_costs(input_tokens, output_tokens, &entry.config_snapshot)?;
+
     let now = now_millis();
     let batch_id = uuid::Uuid::new_v4().to_string();
     for job in &mut jobs {
@@ -1116,15 +1183,15 @@ fn enqueue_preview(
         timeout_seconds: i64::from(entry.config_snapshot.timeout_seconds),
         input_price_micros_per_million: entry.config_snapshot.input_price_micros_per_million,
         output_price_micros_per_million: entry.config_snapshot.output_price_micros_per_million,
-        estimated_input_tokens: entry.estimated_input_tokens,
-        estimated_output_tokens: entry.estimated_output_tokens,
-        estimated_cost_micros: entry.estimated_cost_micros,
-        estimated_max_retry_cost_micros: entry.estimated_max_retry_cost_micros,
+        estimated_input_tokens: input_tokens,
+        estimated_output_tokens: output_tokens,
+        estimated_cost_micros,
+        estimated_max_retry_cost_micros,
         total_targets: entry.total_targets,
-        valid_documents: entry.valid_documents,
+        valid_documents: jobs.len() as i64,
         missing_documents: entry.missing_documents,
         unreadable_documents: entry.unreadable_documents,
-        skipped_targets: entry.skipped_targets,
+        skipped_targets,
         pause_requested: false,
         cancel_requested: false,
         confirmed_at: now,
@@ -1647,6 +1714,25 @@ mod tests {
             }))
             .is_err()
         );
+    }
+
+    #[test]
+    fn missing_only_preview_excludes_existing_results_and_active_jobs() {
+        assert!(mode_allows_status(
+            AiAnalysisMode::MissingOnly,
+            AiAnalysisStatus::Unparsed
+        ));
+        for status in [
+            AiAnalysisStatus::Unconfigured,
+            AiAnalysisStatus::Succeeded,
+            AiAnalysisStatus::Stale,
+            AiAnalysisStatus::Failed,
+            AiAnalysisStatus::Queued,
+            AiAnalysisStatus::Running,
+            AiAnalysisStatus::Paused,
+        ] {
+            assert!(!mode_allows_status(AiAnalysisMode::MissingOnly, status));
+        }
     }
 
     #[test]

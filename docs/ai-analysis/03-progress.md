@@ -162,7 +162,7 @@
 
 - Repository：稳定游标分页（`created_at DESC,id DESC`、cursor由本页最后一行编码）、批次暂停/继续（保留任务原状态）、批次取消（未运行任务终态、返回运行中任务ID供取消句柄）、单任务取消（running仅置标志、终态拒绝、cancelled幂等）、失败Job单项重试（仅接受failed+单目标force预览，`manual_retry_count+1`创建新批次）、队列统计。
 - Commands：九个阶段4命令全部注册；重试预览原子消费；取消批次/任务接入`AiRuntimeState`取消句柄。
-- 管理页：统计卡片、批次列表与进度条、暂停/继续/取消、任务列表（状态/尝试次数/错误/取消/重试）、新建批量（中心库`missing_or_stale`）与单项重试均走真实预览确认；批次/任务每2秒读取后端持久状态，统计仅在初始与操作后刷新（避免高频全量扫描）。
+- 管理页：统计卡片、批次列表与进度条、暂停/继续/取消、任务列表（状态/尝试次数/错误/取消/重试）、一键解析未解析项（中心库`missing_only`）与单项重试均走真实预览确认；批次/任务每2秒读取后端持久状态，统计仅在初始与操作后刷新（避免高频全量扫描）。
 - i18n：新增`ai.manager`（21键）、`ai.batchStatus`（6）、`ai.jobStatus`（7）与`sidebar.aiManager`，三语同构。
 
 验证结果：
@@ -468,3 +468,21 @@
 处理决策：中心 Skill 删除路径现在按规范化 `managed + skill_id` 清理 `skill_ai_analyses`；排队、重试等待和中断任务转为 `cancelled`，运行中任务同时写入持久取消标志并通知内存运行时，避免删除后继续提交结果。任务行保留为批次历史以维持混合批次计数和审计一致性；`ai_analysis_logs` 不在删除路径中处理，继续使用既有 30 天清理和一键清空策略。
 
 验收结果：新增 Repository 定向测试覆盖“成功结果 + 排队任务清理”和“运行任务取消标志”；`core::ai::repository` 19 passed、`commands::skills` 6 passed、`cargo check`通过、`git diff --check`通过。未启动/构建前端；启动、构建、打包命令仍分别为`npm run dev`、`npm run build`、`npm run tauri:build`。
+
+## 18. AI 管理页一键解析范围修复（2026-08-04，已完成）
+
+用户反馈：AI 解读管理页右上角不需要“一键解析失败项”，批量入口应改为“一键解析”；一键解析按钮保持可操作，点击后展示已解析/未解析数量，且不能重复请求已经有 AI 解读的 Skill。
+
+处理决策：移除管理页顶部失败项批量入口；一键解析每次点击都重新读取摘要状态并只提交 `unparsed` 目标，按钮不因统计加载失败而置灰。预览统一使用 `missing_only`，并展示已解析/未解析数量。后端同时按当前持久状态过滤 `succeeded/stale/failed/queued/running/paused` 目标，并将跳过目标从实际请求内容、Token和费用估算中剔除；确认入队时再次复核目标状态，防止预览后状态变化造成重复费用。
+
+修改范围：`src/views/AiAnalysisManager.tsx`、`src/components/ai/AiAnalysisPreviewDialog.tsx`、`src-tauri/src/commands/ai.rs`、`src/i18n/{zh,en,zh-TW}.json`。
+
+验证结果：`cargo test --manifest-path src-tauri/Cargo.toml commands::ai -- --nocapture` 10 passed、`cargo check --manifest-path src-tauri/Cargo.toml`通过、`npx tsc -b --pretty false`通过、`npm run lint`通过、`rustfmt --edition 2021 --check src-tauri/src/commands/ai.rs`通过、`git diff --check`通过。未启动/构建前端；启动、构建、打包命令仍分别为`npm run dev`、`npm run build`、`npm run tauri:build`。
+
+## 19. AI 管理页统计与一键解析可用性修复（2026-08-04，待验收）
+
+问题证据：管理页原有 3 秒前端兜底会在 Rust 全量扫描中心/Agent/项目目标尚未返回时直接把状态改成“统计暂时不可用”。一键解析又依赖这次统计成功，因此统计慢时按钮同时被误置灰；这不是批次/任务查询失败。
+
+处理决策：移除无依据的 3 秒超时，统计在真实命令返回前保持加载状态，只有命令真正失败才显示不可用；批次、任务和日志链路不依赖统计结果。解析目标摘要独立加载，点击一键解析时重新读取并展示已解析/未解析数。后端 enqueue 再次按 `missing_only` 复核当前状态，已解析、失败、过期和活动任务均不会进入实际请求。
+
+验证结果：`cargo test --manifest-path src-tauri/Cargo.toml commands::ai -- --nocapture` 10 passed、`cargo check --manifest-path src-tauri/Cargo.toml`通过、`npx tsc -b --pretty false`通过、`npm run lint`通过、`rustfmt --edition 2021 --check src-tauri/src/commands/ai.rs`通过、`git diff --check`通过。统计真实返回耗时需在桌面应用环境复测；未启动/构建前端。

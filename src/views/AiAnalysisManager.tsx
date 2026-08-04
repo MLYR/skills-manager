@@ -38,8 +38,8 @@ export function AiAnalysisManager() {
   const [selectedJobId, setSelectedJobId] = useState<string | null>(null);
   const [jobLogs, setJobLogs] = useState<AiLogDetailDto[]>([]);
   const [jobLogsLoading, setJobLogsLoading] = useState(false);
-  const [failedJobs, setFailedJobs] = useState<AiJobDto[]>([]);
-  const [failedJobsLoading, setFailedJobsLoading] = useState(false);
+  const [unparsedLoading, setUnparsedLoading] = useState(false);
+  const [analysisCounts, setAnalysisCounts] = useState<{ parsed: number; unparsed: number } | null>(null);
   const [loading, setLoading] = useState(true);
   const [preview, setPreview] = useState<AiAnalysisPreviewDto | null>(null);
   const [previewBusy, setPreviewBusy] = useState(false);
@@ -58,47 +58,43 @@ export function AiAnalysisManager() {
       .catch((error) => toast.error(aiErrorMessage(error)));
   }, []);
 
-  const loadFailedJobs = useCallback(async () => {
-    setFailedJobsLoading(true);
+  const loadUnparsedTargets = useCallback(async (): Promise<{
+    targets: AiTargetRef[];
+    counts: { parsed: number; unparsed: number };
+  } | null> => {
+    setUnparsedLoading(true);
+    const targets: AiTargetRef[] = managedSkills.map((skill) => ({
+      kind: "managed",
+      skill_id: skill.id,
+    }));
     try {
-      const allFailed: AiJobDto[] = [];
-      let cursor: string | null = null;
-      do {
-        const page = await listAiAnalysisJobs({ status: "failed", cursor, limit: 100 });
-        allFailed.push(...page.items);
-        cursor = page.next_cursor;
-      } while (cursor && allFailed.length < 1000);
-
-      // A failed historical job can be superseded by a later success. Recheck
-      // target status so the one-click action never charges for a fresh result.
-      const uniqueTargets = Array.from(
-        new Map(allFailed.map((job) => [JSON.stringify(job.target), job.target])).values(),
-      );
-      if (uniqueTargets.length === 0) {
-        setFailedJobs([]);
-        return;
+      if (targets.length === 0) {
+        const counts = { parsed: 0, unparsed: 0 };
+        setAnalysisCounts(counts);
+        return { targets: [], counts };
       }
-      const summaries = await listAiAnalysisSummaries({ targets: uniqueTargets });
-      const failedKeys = new Set(
-        summaries
-          .filter((summary) => summary.status === "failed")
-          .map((summary) => JSON.stringify(summary.target)),
-      );
-      const seen = new Set<string>();
-      setFailedJobs(
-        allFailed.filter((job) => {
-          const key = JSON.stringify(job.target);
-          if (!failedKeys.has(key) || seen.has(key)) return false;
-          seen.add(key);
-          return true;
-        }),
-      );
+      const summaries = await listAiAnalysisSummaries({ targets });
+      // Only explicitly unparsed targets are eligible. Unconfigured, failed,
+      // stale, queued, and already succeeded targets must never be included.
+      const next = summaries
+        .filter((summary) => summary.status === "unparsed")
+        .map((summary) => summary.target);
+      const counts = {
+        // A stale result still exists and is intentionally excluded from the
+        // missing-only action until the user explicitly requests re-analysis.
+        parsed: summaries.filter((summary) => summary.status === "succeeded" || summary.status === "stale").length,
+        unparsed: next.length,
+      };
+      setAnalysisCounts(counts);
+      return { targets: next, counts };
     } catch (error) {
+      setAnalysisCounts(null);
       toast.error(aiErrorMessage(error));
+      return null;
     } finally {
-      setFailedJobsLoading(false);
+      setUnparsedLoading(false);
     }
-  }, []);
+  }, [managedSkills]);
 
   const refresh = useCallback(() => {
     requestRef.current += 1;
@@ -109,26 +105,26 @@ export function AiAnalysisManager() {
         setStats(nextStats);
       })
       .catch((error) => {
-        if (requestId === requestRef.current) toast.error(aiErrorMessage(error));
+        if (requestId === requestRef.current) {
+          toast.error(aiErrorMessage(error));
+        }
       })
       .finally(() => {
         if (requestId === requestRef.current) setLoading(false);
     });
+    // Eligibility is loaded independently because the full cross-workspace
+    // statistics scan can be slow and must not disable this action.
+    void loadUnparsedTargets();
     loadBatches();
-    void loadFailedJobs();
-  }, [loadBatches, loadFailedJobs]);
+  }, [loadBatches, loadUnparsedTargets]);
 
   useEffect(() => {
     refresh();
     // Real backend state only: the fast interval re-reads batches/jobs, never
     // the full filesystem-backed stats scan, and never fabricates progress.
     const timer = window.setInterval(loadBatches, 2_000);
-    // Filesystem statistics are best-effort; do not leave a permanent loading
-    // indicator if a large or unavailable workspace scan takes too long.
-    const statsFallback = window.setTimeout(() => setLoading(false), 3_000);
     return () => {
       window.clearInterval(timer);
-      window.clearTimeout(statsFallback);
     };
   }, [refresh, loadBatches]);
 
@@ -176,34 +172,18 @@ export function AiAnalysisManager() {
   }, [selectedJobId]);
 
   const startBatchPreview = async () => {
-    const targets: AiTargetRef[] = managedSkills.map((skill) => ({
-      kind: "managed",
-      skill_id: skill.id,
-    }));
-    if (targets.length === 0) {
-      toast.error(t("ai.manager.noSkills"));
+    if (unparsedLoading) return;
+    const loaded = await loadUnparsedTargets();
+    if (!loaded) return;
+    if (loaded.targets.length === 0) {
+      toast.success(t("ai.manager.noUnparsed", loaded.counts));
       return;
     }
     try {
-      const next = await previewAiAnalysis({ targets, mode: "missing_or_stale" });
-      setPreview(next);
-    } catch (error) {
-      toast.error(aiErrorMessage(error));
-    }
-  };
-
-  const startFailedPreview = async () => {
-    if (failedJobsLoading) return;
-    if (failedJobs.length === 0) {
-      toast.success(t("ai.manager.noFailedJobs"));
-      return;
-    }
-    try {
-      const next = await previewAiAnalysis({
-        targets: failedJobs.map((job) => job.target),
-        mode: "force",
-      });
-      setRetryJob(null);
+      const next = await previewAiAnalysis({ targets: loaded.targets, mode: "missing_only" });
+      if (next.valid_documents === 0) {
+        return;
+      }
       setPreview(next);
     } catch (error) {
       toast.error(aiErrorMessage(error));
@@ -289,20 +269,12 @@ export function AiAnalysisManager() {
         <div className="flex flex-wrap items-center justify-end gap-2">
           <button
             type="button"
-            onClick={startFailedPreview}
-            disabled={failedJobsLoading || failedJobs.length === 0}
-            className="inline-flex items-center gap-1.5 rounded-lg border border-border-subtle bg-surface px-3 py-1.5 text-[13px] font-medium text-secondary transition-colors hover:bg-surface-hover disabled:cursor-not-allowed disabled:opacity-50"
-          >
-            <RotateCcw className="h-3.5 w-3.5" />
-            {t("ai.manager.retryFailed", { count: failedJobs.length })}
-          </button>
-          <button
-            type="button"
             onClick={startBatchPreview}
+            aria-busy={unparsedLoading}
             className="inline-flex items-center gap-1.5 rounded-lg bg-accent px-3 py-1.5 text-[13px] font-medium text-white transition-colors hover:bg-accent-dark"
           >
             <Plus className="h-3.5 w-3.5" />
-            {t("ai.manager.newBatch")}
+            {unparsedLoading ? t("ai.manager.loadingTargets") : t("ai.manager.newBatch")}
           </button>
         </div>
       </div>
@@ -327,6 +299,11 @@ export function AiAnalysisManager() {
       ) : (
         <div className="rounded-xl border border-border-subtle bg-surface/50 px-3 py-2 text-[12px] text-muted">
           {loading ? t("ai.manager.statsLoading") : t("ai.manager.statsUnavailable")}
+          {analysisCounts ? (
+            <span className="ml-2 text-secondary">
+              {t("ai.preview.analysisCounts", analysisCounts)}
+            </span>
+          ) : null}
         </div>
       )}
 
@@ -529,6 +506,7 @@ export function AiAnalysisManager() {
       <AiAnalysisPreviewDialog
         preview={preview}
         busy={previewBusy}
+        analysisCounts={retryJob ? null : analysisCounts}
         onClose={() => {
           setPreview(null);
           setRetryJob(null);
