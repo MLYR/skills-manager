@@ -1203,7 +1203,10 @@ export function MySkills() {
                   className={cn(
                     // Grid items must be allowed to shrink; otherwise long
                     // CJK/URL-like text expands the item past its column.
-                    "app-panel group relative flex h-full min-w-0 cursor-pointer flex-col overflow-hidden transition-all hover:border-border hover:bg-surface-hover",
+                    "app-panel group relative flex h-full min-w-0 cursor-pointer flex-col transition-all hover:border-border hover:bg-surface-hover",
+                    // The active tag picker must be able to overlay the footer;
+                    // inactive cards keep clipping their content as before.
+                    tagEditSkillId === skill.id ? "overflow-visible" : "overflow-hidden",
                     enabledInPreset && "border-l-2 border-l-accent",
                     isMultiSelect && selectedIds.has(skill.id) && "ring-1 ring-accent border-accent/40"
                   )}
@@ -1257,7 +1260,11 @@ export function MySkills() {
                     </h3>
                   </div>
 
-                  <div className="min-w-0 overflow-hidden px-3.5 pb-3">
+                  {/* Do not let the active tag picker get clipped by the summary section. */}
+                  <div className={cn(
+                    "min-w-0 px-3.5 pb-3",
+                    tagEditSkillId === skill.id ? "overflow-visible" : "overflow-hidden"
+                  )}>
                     {(() => {
                       const summary = summaryFor(skill.id);
                       return summary ? (
