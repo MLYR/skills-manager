@@ -13,6 +13,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 const CLONE_TIMEOUT_SECS: u64 = 300;
+const PROGRESS_UPDATE_INTERVAL: Duration = Duration::from_millis(150);
 
 /// Filename prefix shared by isolated install checkouts under `std::env::temp_dir()`.
 /// Used by both `materialize_cached_repo` (writer) and `validate_clone_temp_path` (reader).
@@ -20,6 +21,39 @@ pub const CLONE_TEMP_PREFIX: &str = "skills-manager-clone-";
 
 /// Callback type for reporting clone progress messages to the UI.
 pub type ProgressCallback = Box<dyn Fn(&str) + Send>;
+
+/// Git backends can report every received object. Keep the latest meaningful
+/// update flowing to the UI without turning a large clone into thousands of
+/// cross-thread events and toast re-renders.
+fn throttle_progress_callback(callback: ProgressCallback) -> ProgressCallback {
+    let last_update = std::sync::Mutex::new((Instant::now(), String::new()));
+    Box::new(move |message: &str| {
+        let is_transfer_update = message.starts_with("Receiving objects:")
+            || message.starts_with("Resolving deltas:")
+            || message.starts_with("Compressing objects:");
+        let should_forward = last_update
+            .lock()
+            .map(|mut state| {
+                let elapsed = state.0.elapsed();
+                if state.1.is_empty()
+                    || !is_transfer_update
+                    || (state.1 != message && elapsed >= PROGRESS_UPDATE_INTERVAL)
+                {
+                    state.0 = Instant::now();
+                    state.1 = message.to_string();
+                    true
+                } else {
+                    false
+                }
+            })
+            // If the optional progress lock is poisoned, preserve visibility
+            // rather than hiding the clone state from the caller.
+            .unwrap_or(true);
+        if should_forward {
+            callback(message);
+        }
+    })
+}
 
 /// Create a `Command` for git that hides the console window on Windows.
 fn git_command() -> Command {
@@ -427,6 +461,7 @@ pub fn clone_repo_ref_with_progress(
     proxy_url: Option<&str>,
     on_progress: Option<ProgressCallback>,
 ) -> Result<PathBuf> {
+    let on_progress = on_progress.map(throttle_progress_callback);
     let cached_dir = repo_cache_dir(url);
     let _cache_lock = lock_repo_cache(&cached_dir, &on_progress)?;
 
@@ -944,6 +979,7 @@ fn resolve_remote_revision_with_git(
 mod tests {
     use super::*;
     use std::fs;
+    use std::sync::{Arc, Mutex};
     use tempfile::tempdir;
 
     // ── parse_git_source ──
@@ -1331,6 +1367,32 @@ mod tests {
         assert_ne!(
             canonicalize_clone_url("https://github.com/acme/skills"),
             canonicalize_clone_url("git@github.com:acme/skills")
+        );
+    }
+
+    #[test]
+    fn throttles_high_frequency_transfer_updates() {
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let received_for_callback = received.clone();
+        let callback: ProgressCallback = Box::new(move |message| {
+            received_for_callback
+                .lock()
+                .unwrap()
+                .push(message.to_string());
+        });
+        let throttled = throttle_progress_callback(callback);
+
+        throttled("Receiving objects: 1/100 (1.0 KB)");
+        throttled("Receiving objects: 2/100 (2.0 KB)");
+        throttled("Receiving objects: 3/100 (3.0 KB)");
+        throttled("Trying alternative clone method…");
+
+        assert_eq!(
+            *received.lock().unwrap(),
+            vec![
+                "Receiving objects: 1/100 (1.0 KB)".to_string(),
+                "Trying alternative clone method…".to_string(),
+            ]
         );
     }
 

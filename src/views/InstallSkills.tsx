@@ -448,7 +448,13 @@ export function InstallSkills() {
       if (getErrorKind(error) === "cancelled") {
         toast.info(t("install.toast.cancelled"), { id: toastId });
       } else {
-        toast.error(getErrorMessage(error, t("common.error")), { id: toastId });
+        const message = getErrorMessage(error, t("common.error"));
+        // A publisher manifest is authoritative when it says an entry was
+        // removed. Drop only this stale card; do not guess a replacement name.
+        if (getErrorKind(error) === "not_found" && message.includes("no longer published")) {
+          setMarketSkills((current) => current.filter((item) => item.id !== skill.id));
+        }
+        toast.error(message, { id: toastId });
       }
     } finally {
       setInstalling(null);

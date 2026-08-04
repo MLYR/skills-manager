@@ -18,7 +18,7 @@ use crate::core::{
     scanner,
     skill_metadata::{self, is_valid_skill_dir},
     skill_store::{SkillRecord, SkillStore, SkillTargetRecord},
-    sync_engine, sync_metadata,
+    skillssh_api, sync_engine, sync_metadata,
     timing::should_log_first_or_slow,
 };
 
@@ -890,6 +890,25 @@ pub async fn install_from_skillssh(
         };
 
         let outcome = (|| -> Result<(String, String), AppError> {
+            if !skillssh_api::is_valid_github_source(&source) {
+                return Err(AppError::invalid_input("Invalid Skills.sh source repository"));
+            }
+            // Some marketplaces retain entries after a publisher removes or
+            // renames them. Resolve only an explicit manifest alias before
+            // cloning; an unknown replacement must remain a visible error.
+            let resolved_skill_id = match skillssh_api::source_manifest_skill_id(
+                &source,
+                &skill_id,
+                proxy_url.as_deref(),
+            ) {
+                Some(Some(resolved)) => resolved,
+                Some(None) => {
+                    return Err(AppError::not_found(format!(
+                        "Skill '{skill_id}' is no longer published by {source}; the publisher did not provide a replacement mapping. Refresh the marketplace and choose an available Skill."
+                    )));
+                }
+                None => skill_id.clone(),
+            };
             emit_progress("cloning");
             let repo_url = format!("https://github.com/{}.git", source);
             let app_for_progress = app_handle.clone();
@@ -918,11 +937,11 @@ pub async fn install_from_skillssh(
             emit_progress("installing");
             let install_result = (|| -> Result<(String, String), AppError> {
                 let _lock = RepoLock::acquire_foreground("install skillssh skill").map_err(AppError::db)?;
-                let skill_dir = resolve_skill_dir(&temp_dir, None, Some(&skill_id))?;
+                let skill_dir = resolve_skill_dir(&temp_dir, None, Some(&resolved_skill_id))?;
                 let revision = git_fetcher::get_head_revision(&temp_dir).map_err(AppError::git)?;
-                let source_ref = format!("{}/{}", source, skill_id);
+                let source_ref = format!("{}/{}", source, resolved_skill_id);
                 let (install_name, destination) =
-                    resolve_skillssh_install_target(&store, &source_ref, &skill_id)?;
+                    resolve_skillssh_install_target(&store, &source_ref, &resolved_skill_id)?;
                 let result = installer::install_skill_dir_to_destination(
                     &skill_dir,
                     &install_name,

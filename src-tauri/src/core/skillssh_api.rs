@@ -49,6 +49,81 @@ pub fn build_http_client(proxy_url: Option<&str>, timeout_secs: u64) -> reqwest:
     builder.build().unwrap_or_default()
 }
 
+/// Check a repository's optional market manifest before cloning. A manifest is
+/// authoritative only when it is readable and structurally valid; unavailable
+/// manifests deliberately fall back to the normal Git install path.
+pub fn source_manifest_skill_id(
+    source: &str,
+    skill_id: &str,
+    proxy_url: Option<&str>,
+) -> Option<Option<String>> {
+    if !is_valid_github_source(source) || skill_id.trim().is_empty() {
+        return None;
+    }
+
+    let client = build_http_client(proxy_url, 5);
+    for branch in ["main", "master"] {
+        let url =
+            format!("https://raw.githubusercontent.com/{source}/{branch}/skills-manifest.json");
+        let response = match client.get(url).send() {
+            Ok(response) => response,
+            Err(_) => return None,
+        };
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            continue;
+        }
+        if !response.status().is_success() {
+            return None;
+        }
+        let body = response.text().ok()?;
+        return manifest_skill_id(&body, source, skill_id);
+    }
+
+    None
+}
+
+fn manifest_skill_id(body: &str, source: &str, skill_id: &str) -> Option<Option<String>> {
+    let manifest: serde_json::Value = serde_json::from_str(body).ok()?;
+    if manifest.get("source")?.as_str()? != source {
+        return None;
+    }
+    let skills = manifest.get("skills")?.as_object()?;
+    if skills.contains_key(skill_id) {
+        return Some(Some(skill_id.to_string()));
+    }
+
+    // Renames are publisher-owned data. Only follow an explicit manifest
+    // alias whose destination is also present in the same manifest; never
+    // infer a replacement from fuzzy names or install counts.
+    let replacement = manifest
+        .get("aliases")
+        .and_then(|value| value.as_object())
+        .and_then(|aliases| aliases.get(skill_id))
+        .and_then(|value| value.as_str())
+        .filter(|candidate| skills.contains_key(*candidate));
+    Some(replacement.map(str::to_string))
+}
+
+pub fn is_valid_github_source(source: &str) -> bool {
+    let mut parts = source.split('/');
+    let Some(owner) = parts.next() else {
+        return false;
+    };
+    let Some(repository) = parts.next() else {
+        return false;
+    };
+    parts.next().is_none()
+        && !owner.is_empty()
+        && !repository.is_empty()
+        && [owner, repository].into_iter().all(|part| {
+            part != "."
+                && part != ".."
+                && part.chars().all(|character| {
+                    character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.')
+                })
+        })
+}
+
 pub fn fetch_leaderboard(
     board: LeaderboardType,
     proxy_url: Option<&str>,
@@ -247,7 +322,10 @@ pub fn search_skills(
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_embedded_skill_objects, parse_next_data};
+    use super::{
+        is_valid_github_source, manifest_skill_id, parse_embedded_skill_objects,
+        parse_next_data,
+    };
 
     #[test]
     fn parses_legacy_next_data_payload() {
@@ -285,5 +363,41 @@ mod tests {
         let skills = parse_embedded_skill_objects(html).expect("legacy fallback should parse");
         assert_eq!(skills.len(), 1);
         assert_eq!(skills[0].id, "openai/skills/playwright");
+    }
+
+    #[test]
+    fn manifest_check_detects_removed_market_skill() {
+        let manifest = r#"{
+            "source": "acme/skills",
+            "skills": { "available": { "files": 1 } }
+        }"#;
+
+        assert_eq!(
+            manifest_skill_id(manifest, "acme/skills", "available"),
+            Some(Some("available".to_string()))
+        );
+        assert_eq!(manifest_skill_id(manifest, "acme/skills", "removed"), Some(None));
+    }
+
+    #[test]
+    fn manifest_check_only_follows_explicit_valid_aliases() {
+        let manifest = r#"{
+            "source": "acme/skills",
+            "skills": { "new-name": { "files": 1 } },
+            "aliases": { "old-name": "new-name", "missing": "not-published" }
+        }"#;
+
+        assert_eq!(
+            manifest_skill_id(manifest, "acme/skills", "old-name"),
+            Some(Some("new-name".to_string()))
+        );
+        assert_eq!(manifest_skill_id(manifest, "acme/skills", "missing"), Some(None));
+    }
+
+    #[test]
+    fn source_manifest_only_accepts_owner_repository_pairs() {
+        assert!(is_valid_github_source("heygen-com/hyperframes"));
+        assert!(!is_valid_github_source("heygen-com/hyperframes/extra"));
+        assert!(!is_valid_github_source("../hyperframes"));
     }
 }
