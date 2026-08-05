@@ -1,4 +1,4 @@
-//! Preview registry and cost estimation.
+//! Preview registry and token estimation.
 //!
 //! The preview registry exists only in process memory with a short TTL: no
 //! confirmed content or non-key configuration snapshot is ever persisted
@@ -49,8 +49,6 @@ pub struct PreviewEntry {
     pub total_characters: i64,
     pub estimated_input_tokens: i64,
     pub estimated_output_tokens: i64,
-    pub estimated_cost_micros: Option<i64>,
-    pub estimated_max_retry_cost_micros: Option<i64>,
     pub total_targets: i64,
     pub valid_documents: i64,
     pub missing_documents: i64,
@@ -185,50 +183,6 @@ fn ceil_div(value: i64, divisor: i64) -> i64 {
     (value + divisor - 1) / divisor
 }
 
-/// Estimate single-success and worst-case three-request cost micros using
-/// checked i128 math; the result must fit i64 or the configuration is invalid.
-/// `None` prices mean the UI shows token estimates without a monetary figure.
-pub fn estimate_costs(
-    input_tokens: i64,
-    output_tokens: i64,
-    config: &AiConfigInput,
-) -> Result<(Option<i64>, Option<i64>), AiCommandError> {
-    let Some(input_price) = config.input_price_micros_per_million else {
-        return Ok((None, None));
-    };
-    let Some(output_price) = config.output_price_micros_per_million else {
-        return Ok((None, None));
-    };
-
-    let single = checked_cost(input_tokens, input_price)?
-        .checked_add(checked_cost(output_tokens, output_price)?)
-        .ok_or_else(cost_overflow)?;
-
-    // Worst case: each of up to three real HTTP requests resends the input
-    // plus the fixed 2048 output reservation, per the frozen upper bound.
-    let retry_input = input_tokens
-        .checked_add(MAX_OUTPUT_TOKENS)
-        .ok_or_else(cost_overflow)?;
-    let per_retry = checked_cost(retry_input, input_price)?
-        .checked_add(checked_cost(MAX_OUTPUT_TOKENS, output_price)?)
-        .ok_or_else(cost_overflow)?;
-    let maximum = single
-        .checked_add(per_retry.checked_mul(2).ok_or_else(cost_overflow)?)
-        .ok_or_else(cost_overflow)?;
-
-    Ok((Some(single), Some(maximum)))
-}
-
-fn checked_cost(tokens: i64, price_micros_per_million: i64) -> Result<i64, AiCommandError> {
-    let numerator = i128::from(tokens) * i128::from(price_micros_per_million);
-    let micros = if numerator <= 0 {
-        0
-    } else {
-        (numerator + 999_999) / 1_000_000
-    };
-    i64::try_from(micros).map_err(|_| cost_overflow())
-}
-
 fn is_cjk(character: char) -> bool {
     matches!(
         character as u32,
@@ -337,15 +291,6 @@ fn preview_error(code: AiErrorCode) -> AiCommandError {
     )
 }
 
-fn cost_overflow() -> AiCommandError {
-    command_error(
-        AiErrorKind::Configuration,
-        AiErrorCode::InvalidConfig,
-        "The configured AI price exceeds the supported cost range.",
-        false,
-    )
-}
-
 fn internal_error() -> AiCommandError {
     command_error(
         AiErrorKind::Internal,
@@ -368,8 +313,8 @@ mod tests {
             timeout_seconds: 60,
             concurrency: 1,
             log_retention_days: 30,
-            input_price_micros_per_million: Some(1_000_000),
-            output_price_micros_per_million: Some(2_000_000),
+            input_price_micros_per_million: None,
+            output_price_micros_per_million: None,
         }
     }
 
@@ -396,32 +341,6 @@ mod tests {
     }
 
     #[test]
-    fn cost_estimate_uses_single_and_three_request_bounds() {
-        let (single, maximum) = estimate_costs(512, 512, &config()).unwrap();
-        // input 512 * 1 micro = 512; output 512 * 2 micro = 1024.
-        assert_eq!(single, Some(1_536));
-        // retry per request: input 512+2048=2560 *1 + output 2048*2 = 2560+4096=6656
-        // maximum = 1536 + 6656*2 = 14848
-        assert_eq!(maximum, Some(14_848));
-    }
-
-    #[test]
-    fn missing_prices_produce_null_amounts() {
-        let mut config = config();
-        config.input_price_micros_per_million = None;
-        assert_eq!(estimate_costs(512, 512, &config).unwrap(), (None, None));
-    }
-
-    #[test]
-    fn cost_overflow_returns_invalid_config() {
-        let mut config = config();
-        config.input_price_micros_per_million = Some(1_000_000_000_000_000);
-        config.output_price_micros_per_million = Some(1_000_000_000_000_000);
-        let result = estimate_costs(i64::MAX - 1, i64::MAX - 1, &config);
-        assert_eq!(result.unwrap_err().code, AiErrorCode::InvalidConfig);
-    }
-
-    #[test]
     fn preview_registry_consumes_once_and_expires() {
         let registry: Mutex<HashMap<String, PreviewEntry>> = Mutex::new(HashMap::new());
         let entry = PreviewEntry {
@@ -433,8 +352,6 @@ mod tests {
             total_characters: 0,
             estimated_input_tokens: 0,
             estimated_output_tokens: 0,
-            estimated_cost_micros: None,
-            estimated_max_retry_cost_micros: None,
             total_targets: 0,
             valid_documents: 0,
             missing_documents: 0,
@@ -461,8 +378,6 @@ mod tests {
             total_characters: 0,
             estimated_input_tokens: 0,
             estimated_output_tokens: 0,
-            estimated_cost_micros: None,
-            estimated_max_retry_cost_micros: None,
             total_targets: 0,
             valid_documents: 0,
             missing_documents: 0,

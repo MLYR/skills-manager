@@ -1,39 +1,50 @@
 use std::sync::Arc;
 use std::time::Instant;
 
+use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use tauri::State;
 
 use crate::core::ai::command_error;
 use crate::core::ai::config::{
-    load_config, provider_presets, provider_requires_api_key, save_config, to_dto,
-    validate_connection_config,
+    load_api_key, load_config, load_config_and_api_key, provider_presets,
+    provider_requires_api_key, save_config_with_api_key, to_dto, validate_connection_config,
+    validate_model_list_config,
 };
 use crate::core::ai::document::{collect_document, CollectedDocument, DocumentOutcome};
 use crate::core::ai::preview::{
-    consume_preview, error_code_from_name, estimate_costs, item_from_document, new_preview_id,
-    now_millis, register_preview, PreviewEntry, PREVIEW_TTL_MILLIS,
+    consume_preview, error_code_from_name, item_from_document, new_preview_id, now_millis,
+    register_preview, PreviewEntry, PREVIEW_TTL_MILLIS,
 };
 use crate::core::ai::prompt::PROMPT_VERSION;
-use crate::core::ai::provider::{connection_message, send_minimal_completion, ProviderAttempt};
+use crate::core::ai::provider::{
+    connection_message, send_minimal_completion, send_model_list, ProviderAttempt,
+};
 use crate::core::ai::repository::{
     canonical_target, target_ref_from_payload, AiRepository, CancelJobOutcome, TargetState,
 };
 use crate::core::ai::runner::AiRuntimeState;
-use crate::core::ai::secret_store::SecretStore;
 use crate::core::ai::types::{
     AiAnalysisDetailDto, AiAnalysisMode, AiAnalysisPreviewDto, AiAnalysisResultV1,
     AiAnalysisStatus, AiAnalysisSummaryDto, AiApiKeyStatusDto, AiBatchDto, AiBatchListInput,
     AiBatchPageDto, AiBatchRecord, AiBatchStatus, AiCommandError, AiConfigDto, AiConfigInput,
     AiConnectionTestDto, AiConnectionTestInput, AiErrorCode, AiErrorKind, AiJobListInput,
     AiJobPageDto, AiJobRecord, AiJobStatus, AiLogDetailDto, AiLogListInput, AiLogPageDto,
-    AiLogRecord, AiLogSummaryDto, AiPreviewEligibility, AiProviderPresetDto, AiQueueStatsDto,
-    AiTargetRef,
+    AiLogRecord, AiLogSummaryDto, AiModelDto, AiModelListInput, AiPreviewEligibility,
+    AiProviderPresetDto, AiQueueStatsDto, AiTargetRef,
 };
 use crate::core::project_scanner;
 use crate::core::skill_store::SkillStore;
 use crate::core::tool_adapters;
 use std::path::Path;
+
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct SaveAiConfigInput {
+    config: AiConfigInput,
+    api_key: String,
+}
 
 #[derive(Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
@@ -121,58 +132,116 @@ pub fn get_ai_provider_presets() -> Result<Vec<AiProviderPresetDto>, AiCommandEr
 }
 
 #[tauri::command]
+pub async fn get_ai_models(
+    input: AiModelListInput,
+    store: State<'_, Arc<SkillStore>>,
+) -> Result<Vec<AiModelDto>, AiCommandError> {
+    validate_model_list_config(&input.config)?;
+    let store = store.inner().clone();
+    let config = input.config;
+    let provider = config.provider.clone();
+    let requested_api_key = input.api_key;
+    let (api_key, proxy_url) = run_blocking(move || {
+        // 模型列表请求同样优先使用本次输入的 Key，避免刷新时误用旧配置。
+        let api_key = resolve_connection_api_key(&provider, true, requested_api_key, || {
+            load_api_key(&store)
+        })?;
+        let proxy_url = store.get_setting("proxy_url").map_err(|_| {
+            command_error(
+                AiErrorKind::Storage,
+                AiErrorCode::Db,
+                "Unable to read the proxy configuration.",
+                true,
+            )
+        })?;
+        Ok((api_key, proxy_url))
+    })
+    .await?;
+
+    match send_model_list(&config, api_key.as_deref(), proxy_url.as_deref()).await? {
+        ProviderAttempt::Response { status, body, .. } => {
+            if !status.is_success() {
+                return Err(model_list_status_error(status));
+            }
+            parse_model_list_response(&body)
+        }
+        ProviderAttempt::Failed {
+            code,
+            message,
+            latency_ms: _,
+        } => Err(command_error(
+            AiErrorKind::Provider,
+            code,
+            message,
+            matches!(code, AiErrorCode::HttpTimeout | AiErrorCode::HttpRequest),
+        )),
+    }
+}
+
+#[tauri::command]
 pub async fn get_ai_config(
     store: State<'_, Arc<SkillStore>>,
 ) -> Result<AiConfigDto, AiCommandError> {
     let store = store.inner().clone();
     run_blocking(move || {
-        let config = load_config(&store)?;
-        let has_api_key = SecretStore::new()?.has()?;
-        Ok(to_dto(config, has_api_key))
+        let (config, api_key) = load_config_and_api_key(&store)?;
+        Ok(to_dto(config, api_key))
     })
     .await
 }
 
 #[tauri::command]
 pub async fn save_ai_config(
-    input: AiConfigInput,
+    input: SaveAiConfigInput,
     store: State<'_, Arc<SkillStore>>,
 ) -> Result<AiConfigDto, AiCommandError> {
     let store = store.inner().clone();
     run_blocking(move || {
-        // Validate both configuration and Keyring availability before writing,
-        // avoiding a successful save followed by a misleading command failure.
-        crate::core::ai::config::validate_config(&input)?;
-        let has_api_key = SecretStore::new()?.has()?;
-        save_config(&store, &input)?;
-        Ok(to_dto(input, has_api_key))
+        crate::core::ai::config::validate_config(&input.config)?;
+        save_config_with_api_key(&store, &input.config, Some(&input.api_key))?;
+        let (config, api_key) = load_config_and_api_key(&store)?;
+        Ok(to_dto(config, api_key))
     })
     .await
 }
 
 #[tauri::command]
-pub async fn get_ai_api_key_status() -> Result<AiApiKeyStatusDto, AiCommandError> {
-    run_blocking(|| {
+pub async fn get_ai_api_key_status(
+    store: State<'_, Arc<SkillStore>>,
+) -> Result<AiApiKeyStatusDto, AiCommandError> {
+    let store = store.inner().clone();
+    run_blocking(move || {
         Ok(AiApiKeyStatusDto {
-            has_api_key: SecretStore::new()?.has()?,
+            has_api_key: load_api_key(&store)?.is_some(),
         })
     })
     .await
 }
 
 #[tauri::command]
-pub async fn set_ai_api_key(input: SetAiApiKeyInput) -> Result<AiApiKeyStatusDto, AiCommandError> {
+pub async fn set_ai_api_key(
+    input: SetAiApiKeyInput,
+    store: State<'_, Arc<SkillStore>>,
+) -> Result<AiApiKeyStatusDto, AiCommandError> {
+    let store = store.inner().clone();
     run_blocking(move || {
-        SecretStore::new()?.set(&input.api_key)?;
-        Ok(AiApiKeyStatusDto { has_api_key: true })
+        let config = load_config(&store)?;
+        save_config_with_api_key(&store, &config, Some(&input.api_key))?;
+        Ok(AiApiKeyStatusDto {
+            has_api_key: load_api_key(&store)?.is_some(),
+        })
     })
     .await
 }
 
 #[tauri::command]
-pub async fn delete_ai_api_key() -> Result<AiApiKeyStatusDto, AiCommandError> {
-    run_blocking(|| {
-        SecretStore::new()?.delete()?;
+pub async fn delete_ai_api_key(
+    store: State<'_, Arc<SkillStore>>,
+) -> Result<AiApiKeyStatusDto, AiCommandError> {
+    let store = store.inner().clone();
+    run_blocking(move || {
+        let config = load_config(&store)?;
+        save_config_with_api_key(&store, &config, Some(""))?;
         Ok(AiApiKeyStatusDto { has_api_key: false })
     })
     .await
@@ -186,19 +255,21 @@ pub async fn test_ai_connection(
     validate_connection_config(&input.config)?;
     let started = Instant::now();
     // An unconfirmed test ends immediately after pure configuration and URL
-    // validation, before Keyring, settings, client, DNS, or network access.
+    // validation, before local settings, client, DNS, or network access.
     if !input.confirm_billable_request {
         return Ok(local_validation_success(&input.config, started));
     }
 
     let store = store.inner().clone();
     let config = input.config;
+    let requested_api_key = input.api_key;
 
     let (config, api_key, proxy_url) = run_blocking(move || {
-        // Construct SecretStore only inside the required-provider loader so a
-        // confirmed Ollama test remains independent from Keyring availability.
+        // 本次输入的 Key 优先于已保存值，避免测试误用旧配置。
         let api_key =
-            resolve_connection_api_key(&config.provider, true, || SecretStore::new()?.load())?;
+            resolve_connection_api_key(&config.provider, true, requested_api_key, || {
+                load_api_key(&store)
+            })?;
 
         // Required credentials (when any) and proxy settings are resolved in
         // the same blocking phase immediately before the network request.
@@ -263,6 +334,69 @@ async fn execute_connection_test(
             billable_request_sent: true,
         }),
     }
+}
+
+fn parse_model_list_response(body: &[u8]) -> Result<Vec<AiModelDto>, AiCommandError> {
+    let value: Value = serde_json::from_slice(body).map_err(|_| {
+        command_error(
+            AiErrorKind::Provider,
+            AiErrorCode::InvalidJson,
+            "The AI provider model list was not valid JSON.",
+            false,
+        )
+    })?;
+    let data = value.get("data").and_then(Value::as_array).ok_or_else(|| {
+        command_error(
+            AiErrorKind::Provider,
+            AiErrorCode::ProviderResponse,
+            "The AI provider model list did not contain a data array.",
+            false,
+        )
+    })?;
+    if data.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut ids = data
+        .iter()
+        .filter_map(|item| item.get("id").and_then(Value::as_str))
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    if ids.is_empty() {
+        return Err(command_error(
+            AiErrorKind::Provider,
+            AiErrorCode::ProviderResponse,
+            "The AI provider model list did not contain usable model IDs.",
+            false,
+        ));
+    }
+    ids.sort_unstable();
+    ids.dedup();
+    Ok(ids.into_iter().map(|id| AiModelDto { id }).collect())
+}
+
+fn model_list_status_error(status: StatusCode) -> AiCommandError {
+    let (code, retryable) = match status {
+        StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => (AiErrorCode::HttpAuth, false),
+        StatusCode::TOO_MANY_REQUESTS => (AiErrorCode::RateLimited, true),
+        StatusCode::REQUEST_TIMEOUT
+        | StatusCode::INTERNAL_SERVER_ERROR
+        | StatusCode::BAD_GATEWAY
+        | StatusCode::SERVICE_UNAVAILABLE
+        | StatusCode::GATEWAY_TIMEOUT => (AiErrorCode::HttpRequest, true),
+        _ => (AiErrorCode::ProviderResponse, false),
+    };
+    command_error(
+        AiErrorKind::Provider,
+        code,
+        format!(
+            "The AI provider model list returned HTTP {}.",
+            status.as_u16()
+        ),
+        retryable,
+    )
 }
 
 #[tauri::command]
@@ -616,12 +750,12 @@ pub async fn retry_ai_analysis_job(
             prompt_version: PROMPT_VERSION.to_string(),
             schema_version: 1,
             timeout_seconds: i64::from(entry.config_snapshot.timeout_seconds),
-            input_price_micros_per_million: entry.config_snapshot.input_price_micros_per_million,
-            output_price_micros_per_million: entry.config_snapshot.output_price_micros_per_million,
+            input_price_micros_per_million: None,
+            output_price_micros_per_million: None,
             estimated_input_tokens: entry.estimated_input_tokens,
             estimated_output_tokens: entry.estimated_output_tokens,
-            estimated_cost_micros: entry.estimated_cost_micros,
-            estimated_max_retry_cost_micros: entry.estimated_max_retry_cost_micros,
+            estimated_cost_micros: None,
+            estimated_max_retry_cost_micros: None,
             total_targets: 1,
             valid_documents: 1,
             missing_documents: 0,
@@ -1012,7 +1146,6 @@ fn build_preview(
         }
     }
 
-    let (cost, maximum_cost) = estimate_costs(input_tokens, output_tokens, config)?;
     let output_language = resolve_output_language(&config.output_language);
     let now = now_millis();
     let entry = PreviewEntry {
@@ -1024,8 +1157,6 @@ fn build_preview(
         total_characters,
         estimated_input_tokens: input_tokens,
         estimated_output_tokens: output_tokens,
-        estimated_cost_micros: cost,
-        estimated_max_retry_cost_micros: maximum_cost,
         total_targets: targets.len() as i64,
         valid_documents: valid,
         missing_documents: missing,
@@ -1060,8 +1191,6 @@ fn build_preview(
         total_characters,
         estimated_input_tokens: input_tokens,
         estimated_output_tokens: output_tokens,
-        estimated_cost_micros: cost,
-        estimated_max_retry_cost_micros: maximum_cost,
         provider: config.provider.clone(),
         base_url: config.base_url.clone(),
         model: config.model.clone(),
@@ -1163,9 +1292,6 @@ fn enqueue_preview(
         ));
     }
 
-    let (estimated_cost_micros, estimated_max_retry_cost_micros) =
-        estimate_costs(input_tokens, output_tokens, &entry.config_snapshot)?;
-
     let now = now_millis();
     let batch_id = uuid::Uuid::new_v4().to_string();
     for job in &mut jobs {
@@ -1181,12 +1307,12 @@ fn enqueue_preview(
         prompt_version: PROMPT_VERSION.to_string(),
         schema_version: 1,
         timeout_seconds: i64::from(entry.config_snapshot.timeout_seconds),
-        input_price_micros_per_million: entry.config_snapshot.input_price_micros_per_million,
-        output_price_micros_per_million: entry.config_snapshot.output_price_micros_per_million,
+        input_price_micros_per_million: None,
+        output_price_micros_per_million: None,
         estimated_input_tokens: input_tokens,
         estimated_output_tokens: output_tokens,
-        estimated_cost_micros,
-        estimated_max_retry_cost_micros,
+        estimated_cost_micros: None,
+        estimated_max_retry_cost_micros: None,
         total_targets: entry.total_targets,
         valid_documents: jobs.len() as i64,
         missing_documents: entry.missing_documents,
@@ -1375,7 +1501,11 @@ where
         })?
 }
 
-fn ensure_required_key(provider: &str, has_api_key: bool) -> Result<(), AiCommandError> {
+fn ensure_required_key(provider: &str, api_key: Option<&str>) -> Result<(), AiCommandError> {
+    let has_api_key = api_key
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .is_some();
     if provider_requires_api_key(provider) && !has_api_key {
         return Err(command_error(
             AiErrorKind::Configuration,
@@ -1390,19 +1520,23 @@ fn ensure_required_key(provider: &str, has_api_key: bool) -> Result<(), AiComman
 fn resolve_connection_api_key<F>(
     provider: &str,
     confirm_billable_request: bool,
+    requested_api_key: Option<String>,
     load_required_key: F,
 ) -> Result<Option<String>, AiCommandError>
 where
     F: FnOnce() -> Result<Option<String>, AiCommandError>,
 {
     // Keep this lower-level gate defensive for future call sites as well: no
-    // unconfirmed or keyless request may invoke the Keyring-backed loader.
+    // unconfirmed or keyless request may load local credentials.
     if !confirm_billable_request || !provider_requires_api_key(provider) {
         return Ok(None);
     }
 
-    let api_key = load_required_key()?;
-    ensure_required_key(provider, api_key.is_some())?;
+    let api_key = match requested_api_key {
+        Some(api_key) => Some(api_key),
+        None => load_required_key()?,
+    };
+    ensure_required_key(provider, api_key.as_deref())?;
     Ok(api_key)
 }
 
@@ -1491,8 +1625,6 @@ fn to_batch_dto(store: &SkillStore, batch: &AiBatchRecord) -> Result<AiBatchDto,
         skipped_targets: batch.skipped_targets,
         estimated_input_tokens: batch.estimated_input_tokens,
         estimated_output_tokens: batch.estimated_output_tokens,
-        estimated_cost_micros: batch.estimated_cost_micros,
-        estimated_max_retry_cost_micros: batch.estimated_max_retry_cost_micros,
         jobs_queued: queued,
         jobs_running: running,
         jobs_retry_wait: retry_wait,
@@ -1632,13 +1764,56 @@ mod tests {
             }))
             .is_err()
         );
+        assert!(
+            serde_json::from_value::<AiModelListInput>(serde_json::json!({
+                "config": valid_config(),
+                "unexpected": true
+            }))
+            .is_err()
+        );
     }
 
     #[test]
-    fn all_unconfirmed_providers_skip_the_keyring_loader() {
+    fn model_list_response_is_sorted_deduplicated_and_redacts_invalid_shape() {
+        let models = parse_model_list_response(
+            br#"{"data":[{"id":"z-model"},{"id":"a-model"},{"id":"z-model"},{"id":"  "}]}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            models.into_iter().map(|model| model.id).collect::<Vec<_>>(),
+            vec!["a-model", "z-model"]
+        );
+        assert_eq!(
+            parse_model_list_response(br#"{"models":[]}"#)
+                .unwrap_err()
+                .code,
+            AiErrorCode::ProviderResponse
+        );
+        assert_eq!(
+            parse_model_list_response(br#"not-json"#).unwrap_err().code,
+            AiErrorCode::InvalidJson
+        );
+    }
+
+    #[test]
+    fn model_list_http_failures_keep_structured_recovery_codes() {
+        assert_eq!(
+            model_list_status_error(StatusCode::UNAUTHORIZED).code,
+            AiErrorCode::HttpAuth
+        );
+        assert!(model_list_status_error(StatusCode::TOO_MANY_REQUESTS).retryable);
+        assert!(model_list_status_error(StatusCode::BAD_GATEWAY).retryable);
+        assert_eq!(
+            model_list_status_error(StatusCode::NOT_FOUND).code,
+            AiErrorCode::ProviderResponse
+        );
+    }
+
+    #[test]
+    fn all_unconfirmed_providers_skip_the_local_key_loader() {
         for provider in ["openai", "deepseek", "openrouter", "ollama", "custom"] {
             let loader_called = std::cell::Cell::new(false);
-            let api_key = resolve_connection_api_key(provider, false, || {
+            let api_key = resolve_connection_api_key(provider, false, None, || {
                 loader_called.set(true);
                 Ok(Some("must-not-be-read".into()))
             })
@@ -1652,7 +1827,7 @@ mod tests {
     #[test]
     fn confirmed_cloud_provider_still_requires_a_key() {
         assert_eq!(
-            resolve_connection_api_key("custom", true, || Ok(None))
+            resolve_connection_api_key("custom", true, None, || Ok(None))
                 .unwrap_err()
                 .code,
             AiErrorCode::KeyUnavailable
@@ -1660,9 +1835,9 @@ mod tests {
     }
 
     #[test]
-    fn confirmed_ollama_connection_never_invokes_the_keyring_loader() {
+    fn confirmed_ollama_connection_never_invokes_the_local_key_loader() {
         let loader_called = std::cell::Cell::new(false);
-        let api_key = resolve_connection_api_key("ollama", true, || {
+        let api_key = resolve_connection_api_key("ollama", true, None, || {
             loader_called.set(true);
             Ok(Some("must-not-be-read".into()))
         })
@@ -1675,13 +1850,26 @@ mod tests {
     #[test]
     fn confirmed_required_provider_loads_the_key_value() {
         let loader_called = std::cell::Cell::new(false);
-        let real_key = resolve_connection_api_key("openai", true, || {
+        let real_key = resolve_connection_api_key("openai", true, None, || {
             loader_called.set(true);
             Ok(Some("test-key".into()))
         })
         .unwrap();
         assert!(loader_called.get());
         assert_eq!(real_key.as_deref(), Some("test-key"));
+    }
+
+    #[test]
+    fn confirmed_connection_prefers_the_key_entered_for_this_test() {
+        let loader_called = std::cell::Cell::new(false);
+        let api_key = resolve_connection_api_key("openai", true, Some("typed-key".into()), || {
+            loader_called.set(true);
+            Ok(Some("stored-key".into()))
+        })
+        .unwrap();
+
+        assert_eq!(api_key.as_deref(), Some("typed-key"));
+        assert!(!loader_called.get());
     }
 
     #[test]

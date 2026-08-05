@@ -1,4 +1,5 @@
 use crate::core::skill_store::SkillStore;
+use serde_json::Value;
 
 use super::command_error;
 use super::provider::validate_base_url;
@@ -8,11 +9,23 @@ use super::types::{
 
 pub const AI_CONFIG_SETTING_KEY: &str = "ai_analysis_config_v1";
 pub const DEFAULT_LOG_RETENTION_DAYS: u16 = 30;
-const MAX_PRICE_MICROS_PER_MILLION: i64 = 1_000_000_000_000_000;
+const MAX_API_KEY_BYTES: usize = 16_384;
+const API_KEY_FIELD: &str = "api_key";
 
 /// Only a genuinely absent setting receives defaults; malformed or obsolete
 /// JSON must stay visible as invalid_config instead of silently changing spend.
 pub fn load_config(store: &SkillStore) -> Result<AiConfigInput, AiCommandError> {
+    load_config_and_api_key(store).map(|(config, _)| config)
+}
+
+pub fn load_api_key(store: &SkillStore) -> Result<Option<String>, AiCommandError> {
+    load_config_and_api_key(store).map(|(_, api_key)| api_key)
+}
+
+pub fn load_config_and_api_key(
+    store: &SkillStore,
+) -> Result<(AiConfigInput, Option<String>), AiCommandError> {
+    // 配置和 Key 共用同一 settings 行，读取时一次解析，避免测试与 Runner 使用不同来源。
     let raw = store.get_setting(AI_CONFIG_SETTING_KEY).map_err(|_| {
         command_error(
             AiErrorKind::Storage,
@@ -23,14 +36,52 @@ pub fn load_config(store: &SkillStore) -> Result<AiConfigInput, AiCommandError> 
     })?;
 
     match raw {
-        Some(raw) => parse_persisted_config(&raw),
-        None => Ok(default_config()),
+        Some(raw) => parse_persisted_config_with_key(&raw),
+        None => Ok((default_config(), None)),
     }
 }
 
 pub fn save_config(store: &SkillStore, input: &AiConfigInput) -> Result<(), AiCommandError> {
+    save_config_with_api_key(store, input, None)
+}
+
+pub fn save_config_with_api_key(
+    store: &SkillStore,
+    input: &AiConfigInput,
+    api_key: Option<&str>,
+) -> Result<(), AiCommandError> {
     validate_config(input)?;
-    let serialized = serde_json::to_string(input).map_err(|_| {
+    let persisted_key = match api_key {
+        Some(api_key) => normalize_api_key(api_key)?,
+        None => load_api_key(store)?,
+    };
+    // Key 只进入本地配置 JSON；settings 层会按现有规则加密整行。
+    let mut persisted_config = input.clone();
+    // 新配置不再保存旧价格字段，避免历史单价继续影响后续界面或批次。
+    persisted_config.input_price_micros_per_million = None;
+    persisted_config.output_price_micros_per_million = None;
+    let mut value = serde_json::to_value(&persisted_config).map_err(|_| {
+        command_error(
+            AiErrorKind::Internal,
+            AiErrorCode::Internal,
+            "Unable to serialize the AI configuration.",
+            false,
+        )
+    })?;
+    let object = value.as_object_mut().ok_or_else(|| {
+        command_error(
+            AiErrorKind::Internal,
+            AiErrorCode::Internal,
+            "Unable to serialize the AI configuration.",
+            false,
+        )
+    })?;
+    if let Some(api_key) = persisted_key {
+        object.insert(API_KEY_FIELD.into(), Value::String(api_key));
+    } else {
+        object.remove(API_KEY_FIELD);
+    }
+    let serialized = serde_json::to_string(&value).map_err(|_| {
         command_error(
             AiErrorKind::Internal,
             AiErrorCode::Internal,
@@ -53,9 +104,24 @@ pub fn save_config(store: &SkillStore, input: &AiConfigInput) -> Result<(), AiCo
 }
 
 pub fn parse_persisted_config(raw: &str) -> Result<AiConfigInput, AiCommandError> {
-    let config: AiConfigInput = serde_json::from_str(raw).map_err(|_| invalid_config())?;
+    parse_persisted_config_with_key(raw).map(|(config, _)| config)
+}
+
+pub fn parse_persisted_config_with_key(
+    raw: &str,
+) -> Result<(AiConfigInput, Option<String>), AiCommandError> {
+    let mut value: Value = serde_json::from_str(raw).map_err(|_| invalid_config())?;
+    let api_key = match value.get(API_KEY_FIELD) {
+        None | Some(Value::Null) => None,
+        Some(Value::String(api_key)) => normalize_api_key(api_key)?,
+        Some(_) => return Err(invalid_config()),
+    };
+    let object = value.as_object_mut().ok_or_else(invalid_config)?;
+    object.remove(API_KEY_FIELD);
+    let config: AiConfigInput =
+        serde_json::from_value(Value::Object(object.clone())).map_err(|_| invalid_config())?;
     validate_config(&config)?;
-    Ok(config)
+    Ok((config, api_key))
 }
 
 pub fn validate_config(config: &AiConfigInput) -> Result<(), AiCommandError> {
@@ -73,8 +139,6 @@ pub fn validate_config(config: &AiConfigInput) -> Result<(), AiCommandError> {
             config.output_language.as_str(),
             "auto" | "zh" | "zh-TW" | "en"
         )
-        || !valid_price(config.input_price_micros_per_million)
-        || !valid_price(config.output_price_micros_per_million)
     {
         return Err(invalid_config());
     }
@@ -96,7 +160,21 @@ pub fn validate_connection_config(config: &AiConfigInput) -> Result<(), AiComman
     validate_config(config)
 }
 
-pub fn to_dto(config: AiConfigInput, has_api_key: bool) -> AiConfigDto {
+pub fn validate_model_list_config(config: &AiConfigInput) -> Result<(), AiCommandError> {
+    // 获取模型列表不依赖已选模型；用临时值复用其余配置和 URL 安全校验，避免自定义服务商陷入先填模型才能获取模型的循环。
+    let mut validation_config = config.clone();
+    if validation_config.model.trim().is_empty() {
+        validation_config.model = "model-list-placeholder".into();
+    }
+    validate_connection_config(&validation_config)
+}
+
+pub fn to_dto(config: AiConfigInput, api_key: Option<String>) -> AiConfigDto {
+    let has_api_key = api_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .is_some();
     let is_configured = validate_connection_config(&config).is_ok()
         && (!provider_requires_api_key(&config.provider) || has_api_key);
     AiConfigDto {
@@ -107,8 +185,7 @@ pub fn to_dto(config: AiConfigInput, has_api_key: bool) -> AiConfigDto {
         timeout_seconds: config.timeout_seconds,
         concurrency: config.concurrency,
         log_retention_days: config.log_retention_days,
-        input_price_micros_per_million: config.input_price_micros_per_million,
-        output_price_micros_per_million: config.output_price_micros_per_million,
+        api_key,
         has_api_key,
         is_configured,
     }
@@ -193,10 +270,20 @@ fn default_config() -> AiConfigInput {
     }
 }
 
-fn valid_price(price: Option<i64>) -> bool {
-    price
-        .map(|value| (0..=MAX_PRICE_MICROS_PER_MILLION).contains(&value))
-        .unwrap_or(true)
+fn normalize_api_key(api_key: &str) -> Result<Option<String>, AiCommandError> {
+    if api_key.as_bytes().len() > MAX_API_KEY_BYTES {
+        return Err(command_error(
+            AiErrorKind::Validation,
+            AiErrorCode::InvalidConfig,
+            "The API key cannot exceed 16384 UTF-8 bytes.",
+            false,
+        ));
+    }
+    if api_key.trim().is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(api_key.to_string()))
+    }
 }
 
 fn preset(
@@ -244,7 +331,7 @@ mod tests {
             timeout_seconds: 60,
             concurrency: 2,
             log_retention_days: 30,
-            input_price_micros_per_million: Some(10),
+            input_price_micros_per_million: None,
             output_price_micros_per_million: None,
         }
     }
@@ -268,19 +355,51 @@ mod tests {
     }
 
     #[test]
-    fn invalid_ranges_and_price_cap_are_rejected() {
+    fn local_api_key_round_trips_and_blank_input_clears_it() {
+        let (_directory, store) = store();
+        let config = valid_config();
+        save_config_with_api_key(&store, &config, Some("local-test-key")).unwrap();
+        assert_eq!(
+            load_api_key(&store).unwrap().as_deref(),
+            Some("local-test-key")
+        );
+
+        save_config_with_api_key(&store, &config, Some("   ")).unwrap();
+        assert_eq!(load_api_key(&store).unwrap(), None);
+    }
+
+    #[test]
+    fn saving_config_drops_legacy_price_fields() {
+        let (_directory, store) = store();
+        let mut config = valid_config();
+        config.input_price_micros_per_million = Some(10);
+        config.output_price_micros_per_million = Some(20);
+        save_config(&store, &config).unwrap();
+
+        let saved = load_config(&store).unwrap();
+        assert_eq!(saved.input_price_micros_per_million, None);
+        assert_eq!(saved.output_price_micros_per_million, None);
+        let raw = store.get_setting(AI_CONFIG_SETTING_KEY).unwrap().unwrap();
+        assert!(raw.contains("provider"));
+        assert!(!raw.contains("input_price_micros_per_million"));
+        assert!(!raw.contains("output_price_micros_per_million"));
+    }
+
+    #[test]
+    fn invalid_ranges_are_rejected() {
         let mut config = valid_config();
         config.concurrency = 0;
         assert_eq!(
             validate_config(&config).unwrap_err().code,
             AiErrorCode::InvalidConfig
         );
-        config.concurrency = 1;
-        config.input_price_micros_per_million = Some(MAX_PRICE_MICROS_PER_MILLION + 1);
-        assert_eq!(
-            validate_config(&config).unwrap_err().code,
-            AiErrorCode::InvalidConfig
-        );
+    }
+
+    #[test]
+    fn model_list_validation_allows_empty_model() {
+        let mut config = valid_config();
+        config.model.clear();
+        assert!(validate_model_list_config(&config).is_ok());
     }
 
     #[test]

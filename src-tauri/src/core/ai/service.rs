@@ -2,7 +2,7 @@
 //! hash, build the untrusted-data prompt, spend one pre-committed HTTP attempt,
 //! validate the response, and persist result/log/job/batch in one transaction.
 //!
-//! Every blocking operation (filesystem, SQLite, keyring) runs on a blocking
+//! Every blocking operation (filesystem and SQLite) runs on a blocking
 //! thread via `spawn_blocking` so the async runner never stalls a Tokio
 //! worker; only the HTTP attempt itself is awaited on the runtime.
 
@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use crate::core::skill_store::SkillStore;
 
-use super::config::{load_config, provider_requires_api_key};
+use super::config::{load_api_key, load_config, provider_requires_api_key};
 use super::document::{collect_document, CollectedDocument, DocumentOutcome};
 use super::logs::{sanitize_error_message, sanitized_record};
 use super::preview::now_millis;
@@ -22,7 +22,6 @@ use super::repository::{
 };
 use super::runner::AiRuntimeState;
 use super::schema::validate_ai_analysis_result_v1;
-use super::secret_store::SecretStore;
 use super::types::{
     AiAnalysisRecord, AiCommandError, AiConfigInput, AiErrorCode, AiErrorKind, AiJobRecord,
     AiLogEventKind, AiLogRecord,
@@ -57,7 +56,7 @@ async fn run_job(
         return Ok(());
     }
 
-    // Blocking preparation: re-locate, hash re-check, config, keyring, prompt.
+    // Blocking preparation: re-locate, hash re-check, config, local key, prompt.
     // `None` means the job already reached a terminal state during prep.
     let prepared = {
         let store = store.clone();
@@ -425,7 +424,7 @@ fn prepare_job(
         .get_setting("proxy_url")
         .map_err(|_| storage_error("read the proxy configuration"))?;
     let api_key = if provider_requires_api_key(&batch.provider) {
-        let key = SecretStore::new()?.load()?;
+        let key = load_api_key(store)?;
         if key
             .as_deref()
             .map(str::trim)

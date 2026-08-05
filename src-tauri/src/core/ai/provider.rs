@@ -6,12 +6,15 @@ use reqwest::{Client, Request, StatusCode, Url};
 use serde_json::json;
 
 use super::command_error;
-use super::config::{provider_requires_api_key, validate_connection_config};
+use super::config::{
+    provider_requires_api_key, validate_connection_config, validate_model_list_config,
+};
 use super::types::{AiCommandError, AiConfigInput, AiErrorCode, AiErrorKind};
 
 pub const MAX_RESPONSE_BYTES: usize = 1_048_576;
 pub const MAX_ANALYSIS_OUTPUT_TOKENS: u32 = 2_048;
 const CHAT_COMPLETIONS_PATH: &str = "chat/completions";
+const MODELS_PATH: &str = "models";
 
 /// Once request sending begins, every outcome stays in this type so callers
 /// can truthfully report that a potentially billable network attempt occurred.
@@ -115,6 +118,67 @@ pub async fn send_minimal_completion(
                 "The AI connection test timed out."
             } else {
                 "The AI provider could not be reached."
+            };
+            return Ok(ProviderAttempt::Failed {
+                code,
+                message: message.into(),
+                latency_ms: elapsed_millis(started),
+            });
+        }
+    };
+
+    read_bounded_response(response, started).await
+}
+
+/// 获取服务商模型列表只读取 OpenAI Compatible 的 `/models` 元数据，不创建
+/// 解析任务或日志；这样设置页可以在不产生模型 Token 费用的情况下更新候选模型。
+pub async fn send_model_list(
+    config: &AiConfigInput,
+    api_key: Option<&str>,
+    proxy_url: Option<&str>,
+) -> Result<ProviderAttempt, AiCommandError> {
+    validate_model_list_config(config)?;
+    let base_url = validate_base_url(&config.provider, &config.base_url)?;
+    let key_required = provider_requires_api_key(&config.provider);
+    if key_required
+        && api_key
+            .map(str::trim)
+            .filter(|key| !key.is_empty())
+            .is_none()
+    {
+        return Err(command_error(
+            AiErrorKind::Configuration,
+            AiErrorCode::KeyUnavailable,
+            "An API key is required for this provider.",
+            false,
+        ));
+    }
+
+    let loopback_http = base_url.scheme() == "http";
+    let client = build_client(config.timeout_seconds, loopback_http, proxy_url)?;
+    let endpoint = base_url.join(MODELS_PATH).map_err(|_| invalid_base_url())?;
+    let request = build_models_request(
+        &client,
+        endpoint,
+        if base_url.scheme() == "https" && key_required {
+            api_key
+        } else {
+            None
+        },
+    )?;
+    let started = Instant::now();
+    let response = match client.execute(request).await {
+        Ok(response) => response,
+        Err(error) => {
+            let code = if error.is_timeout() {
+                AiErrorCode::HttpTimeout
+            } else {
+                AiErrorCode::HttpRequest
+            };
+            let message = if error.is_timeout() {
+                "The AI provider model list request timed out."
+            } else {
+                "The AI provider model list could not be reached."
             };
             return Ok(ProviderAttempt::Failed {
                 code,
@@ -285,6 +349,26 @@ fn build_request(
             AiErrorKind::Provider,
             AiErrorCode::HttpRequest,
             "Unable to create the AI provider request.",
+            false,
+        )
+    })
+}
+
+fn build_models_request(
+    client: &Client,
+    endpoint: Url,
+    api_key: Option<&str>,
+) -> Result<Request, AiCommandError> {
+    let mut request = client.get(endpoint);
+    if let Some(api_key) = api_key {
+        request = request.header(AUTHORIZATION, format!("Bearer {api_key}"));
+    }
+    // 模型列表响应可能来自第三方服务，错误路径不能把请求头或凭据回显给前端。
+    request.build().map_err(|_| {
+        command_error(
+            AiErrorKind::Provider,
+            AiErrorCode::HttpRequest,
+            "Unable to create the AI model list request.",
             false,
         )
     })
@@ -555,6 +639,23 @@ mod tests {
         assert!(!request.contains("cookie:"));
     }
 
+    #[tokio::test]
+    async fn model_list_uses_get_and_never_sends_key_to_loopback() {
+        let (base_url, request) = serve_once(200, "", br#"{"data":[]}"#.to_vec()).await;
+        let attempt = send_model_list(
+            &config("ollama", base_url),
+            Some("placeholder-credential"),
+            Some("http://127.0.0.1:9"),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(attempt, ProviderAttempt::Response { status, .. } if status == 200));
+        let request = request.await.unwrap().to_ascii_lowercase();
+        assert!(request.starts_with("get /v1/models http/1.1\r\n"));
+        assert!(!request.contains("authorization:"));
+        assert!(!request.contains("cookie:"));
+    }
+
     #[test]
     fn https_request_carries_bearer_but_never_cookie_without_sending() {
         let config = config("openai", "https://example.invalid/v1/".into());
@@ -567,6 +668,25 @@ mod tests {
             Some("placeholder-credential"),
         )
         .unwrap();
+        assert_eq!(
+            request.headers().get(AUTHORIZATION).unwrap(),
+            "Bearer placeholder-credential"
+        );
+        assert!(request.headers().get(COOKIE).is_none());
+    }
+
+    #[test]
+    fn models_request_carries_bearer_only_when_provider_allows_it() {
+        let config = config("openai", "https://example.invalid/v1/".into());
+        let base = validate_base_url(&config.provider, &config.base_url).unwrap();
+        let client = build_client(2, false, None).unwrap();
+        let request = build_models_request(
+            &client,
+            base.join(MODELS_PATH).unwrap(),
+            Some("placeholder-credential"),
+        )
+        .unwrap();
+        assert_eq!(request.method(), reqwest::Method::GET);
         assert_eq!(
             request.headers().get(AUTHORIZATION).unwrap(),
             "Bearer placeholder-credential"

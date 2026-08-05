@@ -9,7 +9,6 @@ pub mod provider;
 pub mod repository;
 pub mod runner;
 pub mod schema;
-pub mod secret_store;
 pub mod service;
 pub mod types;
 

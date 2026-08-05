@@ -967,6 +967,7 @@ pub fn run() {
             // AI configuration
             commands::ai::get_ai_provider_presets,
             commands::ai::get_ai_config,
+            commands::ai::get_ai_models,
             commands::ai::save_ai_config,
             commands::ai::get_ai_api_key_status,
             commands::ai::set_ai_api_key,

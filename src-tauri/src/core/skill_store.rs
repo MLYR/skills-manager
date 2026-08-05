@@ -8,7 +8,12 @@ use super::audit_log::{AuditDraft, AuditEntry, MAX_ENTRIES as AUDIT_MAX_ENTRIES}
 use super::crypto;
 
 /// Settings keys whose values are encrypted at rest with AES-256-GCM.
-const SENSITIVE_KEYS: &[&str] = &["proxy_url", "git_backup_remote_url"];
+// AI 配置沿用 settings 的本地加密，避免普通存储变成明文数据库字段。
+const SENSITIVE_KEYS: &[&str] = &[
+    "proxy_url",
+    "git_backup_remote_url",
+    "ai_analysis_config_v1",
+];
 
 pub struct SkillStore {
     conn: Mutex<Connection>,

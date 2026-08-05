@@ -116,12 +116,14 @@ pub struct AiConfigInput {
     pub timeout_seconds: u32,
     pub concurrency: u8,
     pub log_retention_days: u16,
+    // 兼容旧配置读取，但新配置不再保存或使用价格字段。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub input_price_micros_per_million: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_price_micros_per_million: Option<i64>,
 }
 
-/// Configuration DTOs carry only key presence, preventing credentials or
-/// reversible key fragments from entering serialized frontend state.
+/// 配置 DTO 返回本地保存的 Key，设置页需要据此回显掩码并支持替换；AI日志和任务 DTO 仍不携带它。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct AiConfigDto {
@@ -132,8 +134,7 @@ pub struct AiConfigDto {
     pub timeout_seconds: u32,
     pub concurrency: u8,
     pub log_retention_days: u16,
-    pub input_price_micros_per_million: Option<i64>,
-    pub output_price_micros_per_million: Option<i64>,
+    pub api_key: Option<String>,
     pub has_api_key: bool,
     pub is_configured: bool,
 }
@@ -155,9 +156,25 @@ pub struct AiProviderPresetDto {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct AiModelDto {
+    pub id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct AiModelListInput {
+    pub config: AiConfigInput,
+    #[serde(default)]
+    pub api_key: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub struct AiConnectionTestInput {
     pub config: AiConfigInput,
+    #[serde(default)]
+    pub api_key: Option<String>,
     pub confirm_billable_request: bool,
 }
 
@@ -233,8 +250,6 @@ pub struct AiAnalysisPreviewDto {
     pub total_characters: i64,
     pub estimated_input_tokens: i64,
     pub estimated_output_tokens: i64,
-    pub estimated_cost_micros: Option<i64>,
-    pub estimated_max_retry_cost_micros: Option<i64>,
     pub provider: String,
     pub base_url: String,
     pub model: String,
@@ -406,8 +421,6 @@ pub struct AiBatchDto {
     pub skipped_targets: i64,
     pub estimated_input_tokens: i64,
     pub estimated_output_tokens: i64,
-    pub estimated_cost_micros: Option<i64>,
-    pub estimated_max_retry_cost_micros: Option<i64>,
     pub jobs_queued: i64,
     pub jobs_running: i64,
     pub jobs_retry_wait: i64,
@@ -656,7 +669,7 @@ mod tests {
     }
 
     #[test]
-    fn config_dto_exposes_presence_without_key_material() {
+    fn config_dto_exposes_local_key_for_masked_settings_edit() {
         let dto = AiConfigDto {
             provider: "custom".into(),
             base_url: "https://example.invalid/v1/".into(),
@@ -665,15 +678,14 @@ mod tests {
             timeout_seconds: 60,
             concurrency: 1,
             log_retention_days: 30,
-            input_price_micros_per_million: None,
-            output_price_micros_per_million: None,
+            api_key: Some("test-key".into()),
             has_api_key: true,
             is_configured: true,
         };
         let value = serde_json::to_value(dto).unwrap();
 
         assert_eq!(value["has_api_key"], true);
-        assert!(value.get("api_key").is_none());
+        assert_eq!(value["api_key"], "test-key");
         assert!(value.get("masked_api_key").is_none());
     }
 
