@@ -12,7 +12,7 @@ AI 解读是辅助理解层，不是原始文档的替代品。任何时候都�
 
 - OpenAI Compatible 服务配置、模型配置、连接测试和 API Key 安全存储。
 - 单个 Skill 解析、重新解析、批量解析未处理项、更新所有过期项。
-- 解析前展示 Skill 数、主文档数、总字符数、预计 Token 和预计费用（配置单价时）。
+- 解析前展示 Skill 数、主文档数、总字符数和预计 Token，不再估算或展示金额。
 - 解析前预览实际准备发送给 AI 的内容。
 - 持久化任务队列，支持暂停、继续、取消、失败重试和应用重启后续跑。
 - 详情页新增并默认展示“AI 解读”标签。
@@ -43,13 +43,13 @@ Rust 后端
   ├─ Document Collector：安全读取主文档并计算哈希
   ├─ Analysis Service：提示词构造、响应校验、结果保存
   ├─ Job Runner：持久队列、暂停、恢复、取消、限流和重试
-  ├─ Secret Store：系统钥匙串
+  ├─ AI 配置存储：SQLite settings（应用本地配置）
   └─ Log Service：请求/响应日志和30天清理
           │
 SQLite：解读结果、任务、日志、普通配置
 ```
 
-前端不得直接请求模型服务，也不得获取完整 API Key。
+前端不得直接请求模型服务；设置页只在本地配置编辑和连接测试时短暂持有当前 Key。
 
 ## 4. 分析对象与文档来源
 
@@ -103,14 +103,15 @@ AI 必须返回 JSON，不接受 Markdown 作为正式结果：
 | provider | SQLite settings | custom/openai-compatible |
 | base_url | SQLite settings | 用户填写或预设 |
 | model | SQLite settings | 用户填写 |
-| api_key | 系统钥匙串 | 无 |
+| api_key | SQLite settings（应用本地配置） | 无 |
 | timeout_seconds | SQLite settings | 60 |
 | concurrency | SQLite settings | 1，界面限制1～5 |
 | log_retention_days | SQLite settings | 30 |
-| input/output price | SQLite settings | 空，仅用于费用估算 |
 | output_language | SQLite settings | 跟随应用语言 |
 
 内置 OpenAI、DeepSeek、OpenRouter、Ollama 和自定义预设。连接测试只发送最小请求，错误信息必须可读且经过敏感信息清理。
+
+模型列表按需获取：设置页使用当前未保存的 Provider、Base URL 和 API Key 调用 `get_ai_models`，后端向 `base_url + models` 发起 OpenAI Compatible `GET` 请求，解析响应中的 `data[].id`，去重并按模型 ID 排序后返回。获取失败只提示错误并保留当前模型，仍允许用户手动保存已有模型；页面不自动刷新模型列表，避免打开设置页时增加网络等待。
 
 ## 8. 数据模型
 
@@ -136,7 +137,7 @@ running --应用异常退出--> interrupted -> queued
 
 ### `ai_analysis_logs`
 
-保存任务、Skill、实际提示词、原始响应、HTTP 状态码、错误、耗时、Token 和时间。严禁保存 API Key、Authorization、Cookie、完整请求头和钥匙串内容。
+保存任务、Skill、实际提示词、原始响应、HTTP 状态码、错误、耗时、Token 和时间。严禁保存 API Key、Authorization、Cookie、完整请求头和本地配置内容。
 
 ## 9. 限流、重试与恢复
 
@@ -150,9 +151,9 @@ running --应用异常退出--> interrupted -> queued
 
 ## 10. 成本和隐私预览
 
-预览必须发生在任务入队前，显示：Skill数、有效/无文档/不可读数、总字符数、预计输入/输出Token、单次成功预计费用、最多3次请求的保守费用上界及可展开的发送内容。用户确认同时授权该上界内的有限自动重试和至多一次JSON纠正；超过固定`max_tokens`或需要第四次请求时必须失败，不得继续计费。
+预览必须发生在任务入队前，显示：Skill数、有效/无文档/不可读数、总字符数、预计输入/输出Token及可展开的发送内容。用户确认仍授权有限自动重试和至多一次JSON纠正；超过固定`max_tokens`或需要第四次请求时必须停止。第一版不估算或展示金额，实际服务商计费由服务商侧决定。
 
-Token仅作估算：单个Job的预计输入Token=`CJK字符数 + ceil(非CJK Unicode字符数÷4) + 512固定提示词开销`；预计输出Token=`min(2048, max(512, ceil(预计输入Token×0.25)))`。每次模型请求固定发送`max_tokens=2048`。预览同时展示单次成功估算和最多3次真实请求的保守上界；重试/纠正上界按每次输入`预计输入+2048`、输出2048计算。金额计算使用checked i128中间值，对`tokens × price ÷ 1_000_000`向上取整，结果必须能装入i64，否则返回`invalid_config`；输入/输出单价各限制0～1,000,000,000,000,000微单位/百万Token。未配置模型价格时金额为`null`，并标注Token估算不是服务商账单。
+Token仅作估算：单个Job的预计输入Token=`CJK字符数 + ceil(非CJK Unicode字符数÷4) + 512固定提示词开销`；预计输出Token=`min(2048, max(512, ceil(预计输入Token×0.25)))`。每次模型请求固定发送`max_tokens=2048`。界面只展示输入/输出 Token 估算；实际用量以服务商返回的 Token 统计为准。
 
 ## 11. 页面落点
 
@@ -169,7 +170,7 @@ Token仅作估算：单个Job的预计输入Token=`CJK字符数 + ceil(非CJK Un
 1. 单个和批量解析均形成完整闭环。
 2. 暂停、恢复、取消、重试和应用重启后续跑可复现。
 3. 文档变化会标记待更新，且不会自动产生付费请求。
-4. API Key 不进入数据库、日志、前端状态和测试输出。
+4. API Key 不进入 AI 日志、请求头日志和测试输出；本地配置允许保存 API Key，沿用应用 settings 的本地加密存储。
 5. 原始 Skill 文件零修改。
 6. 请求/响应日志可查看、自动清理并可一键清空。
 7. 所有 AI 内容显示免责声明，示例提示词可复制。
@@ -244,7 +245,7 @@ Schema v1大小上限固定如下，字符数均指Unicode scalar value数量，
 
 - `id TEXT PRIMARY KEY`、`status TEXT NOT NULL CHECK(status IN ('queued','running','paused','cancelling','completed','cancelled'))`
 - 已确认的非密钥配置快照：`provider/base_url/model/output_language/prompt_version TEXT NOT NULL`、`schema_version INTEGER NOT NULL CHECK(schema_version = 1)`、`timeout_seconds INTEGER NOT NULL CHECK(timeout_seconds BETWEEN 1 AND 300)`
-- 成本快照：`input_price_micros_per_million INTEGER NULL CHECK(input_price_micros_per_million IS NULL OR input_price_micros_per_million >= 0)`、`output_price_micros_per_million INTEGER NULL CHECK(output_price_micros_per_million IS NULL OR output_price_micros_per_million >= 0)`、`estimated_input_tokens INTEGER NOT NULL CHECK(estimated_input_tokens >= 0)`、`estimated_output_tokens INTEGER NOT NULL CHECK(estimated_output_tokens >= 0)`、`estimated_cost_micros INTEGER NULL CHECK(estimated_cost_micros IS NULL OR estimated_cost_micros >= 0)`、`estimated_max_retry_cost_micros INTEGER NULL CHECK(estimated_max_retry_cost_micros IS NULL OR estimated_max_retry_cost_micros >= 0)`；价格未配置时两个金额均为NULL
+- Token快照：`estimated_input_tokens INTEGER NOT NULL CHECK(estimated_input_tokens >= 0)`、`estimated_output_tokens INTEGER NOT NULL CHECK(estimated_output_tokens >= 0)`；旧版本遗留的价格/金额列继续保留以兼容v8数据库，但新批次统一写入`NULL`且不再计算。
 - 范围统计：`total_targets/valid_documents/missing_documents/unreadable_documents/skipped_targets INTEGER NOT NULL`，且必须满足`total_targets = valid_documents + missing_documents + unreadable_documents + skipped_targets`
 - `pause_requested/cancel_requested INTEGER NOT NULL DEFAULT 0`
 - `confirmed_at/created_at/updated_at INTEGER NOT NULL`、`finished_at INTEGER NULL`
@@ -268,13 +269,13 @@ Schema v1大小上限固定如下，字符数均指Unicode scalar value数量，
 - `request_system_prompt/request_user_prompt/raw_response TEXT NULL`
 - `http_status/input_tokens/output_tokens/total_tokens/duration_ms INTEGER NULL`
 - `error_code/error_message TEXT NULL`、`created_at INTEGER NOT NULL`
-- 只记录AI请求语义内容；禁止认证信息、Cookie、完整请求头和Keyring值
+- 只记录AI请求语义内容；禁止认证信息、Cookie、完整请求头和本地配置中的Key
 
 索引固定为：`ux_skill_ai_analyses_target(target_kind,target_key)`；`ix_ai_analysis_batches_status_created(status,created_at,id)`；`ux_ai_analysis_jobs_batch_ordinal(batch_id,ordinal)`；`ix_ai_analysis_jobs_claim(status,next_retry_at,priority DESC,created_at,batch_id,ordinal,id)`；`ux_ai_analysis_jobs_active_target(target_kind,target_key) WHERE status IN ('queued','running','retry_wait','interrupted')`；`ix_ai_analysis_jobs_target_updated(target_kind,target_key,updated_at DESC,id DESC)`；`ix_ai_analysis_logs_created(created_at,id)`；`ix_ai_analysis_logs_job(job_id)`；`ix_ai_analysis_logs_filters(event_kind,error_code,batch_id,created_at DESC,id DESC)`。Runner领取排序固定为`priority DESC`，随后`created_at ASC,batch_id ASC,ordinal ASC,id ASC`；分页列表按各自`created_at DESC,id DESC`。所有布尔整数限制为0/1；计数、Token、价格、耗时、ordinal和priority按业务要求使用非负`CHECK`；可空数值用`value IS NULL OR value >= 0`。迁移测试必须覆盖新库、真实v7旧库、重复执行和事务失败回滚。
 
-普通配置原子写入现有`settings`表单键`ai_analysis_config_v1`，值为JSON对象：`provider/base_url/model/timeout_seconds/concurrency/log_retention_days/input_price_micros_per_million/output_price_micros_per_million/output_language`。约束为provider=`openai|deepseek|openrouter|ollama|custom`，timeout 1～300默认60，并发1～5默认1，保留期1～3650默认30，价格为每百万Token的货币微单位非负整数或`null`，语言=`auto|zh|zh-TW|en`；预览时把`auto`解析为具体语言写入批次快照。Base URL定义为“OpenAI Compatible API根”，必须包含服务所需的版本路径并以`/`结尾；固定请求端点为相对字符串`chat/completions`，客户端绝不自动插入`v1`。预设固定为OpenAI=`https://api.openai.com/v1/`、DeepSeek=`https://api.deepseek.com/v1/`、OpenRouter=`https://openrouter.ai/api/v1/`、Ollama=`http://127.0.0.1:11434/v1/`；custom若需要v1必须由用户在Base URL中提供。HTTPS可携带Key；HTTP只允许`localhost`、`127.0.0.0/8`或`::1`回环地址且Provider声明`api_key_required=false`，请求不得附加Authorization或任何Key。其他明文HTTP一律返回`invalid_base_url`。URL拒绝userinfo、fragment和query；`reqwest`重定向策略为none，防止Authorization被转发。API Key没有setting键，只使用Keyring service `skills-manager-ai-analysis`、account `default`；Ollama预设声明无需Key。
+普通配置原子写入现有`settings`表单键`ai_analysis_config_v1`，值为JSON对象：`provider/base_url/model/timeout_seconds/concurrency/log_retention_days/output_language/api_key`。旧配置中的`input_price_micros_per_million/output_price_micros_per_million`只为兼容读取，不再参与校验、估算或展示；其中`api_key`属于应用本地配置，不进入AI日志、批次快照或响应DTO之外的调试输出；settings沿用现有本地加密存储。约束为provider=`openai|deepseek|openrouter|ollama|custom`，timeout 1～300默认60，并发1～5默认1，保留期1～3650默认30，语言=`auto|zh|zh-TW|en`；预览时把`auto`解析为具体语言写入批次快照。Base URL定义为“OpenAI Compatible API根”，必须包含服务所需的版本路径并以`/`结尾；固定请求端点为相对字符串`chat/completions`，客户端绝不自动插入`v1`。预设固定为OpenAI=`https://api.openai.com/v1/`、DeepSeek=`https://api.deepseek.com/v1/`、OpenRouter=`https://openrouter.ai/api/v1/`、Ollama=`http://127.0.0.1:11434/v1/`；custom若需要v1必须由用户在Base URL中提供。HTTPS可携带Key；HTTP只允许`localhost`、`127.0.0.0/8`或`::1`回环地址且Provider声明`api_key_required=false`，请求不得附加Authorization或任何Key。其他明文HTTP一律返回`invalid_base_url`。URL拒绝userinfo、fragment和query；`reqwest`重定向策略为none，防止Authorization被转发。Ollama预设声明无需Key。
 
-Provider密钥规则固定为：`ollama`的`api_key_required=false`，`openai/deepseek/openrouter/custom`均为`true`；第一版不支持custom无Key模式，避免前端或服务端自行猜测。新Key按UTF-8原始字节限制1～16,384字节，去除首尾空白后为空则拒绝，但写入Keyring时保留用户提交的原始非空字符串。配置JSON损坏时，自动日志清理仍按隐私优先使用30天默认保留期并记录不含配置原文的`invalid_config`警告，避免损坏配置导致日志永久保留。
+Provider密钥规则固定为：`ollama`的`api_key_required=false`，`openai/deepseek/openrouter/custom`均为`true`；第一版不支持custom无Key模式，避免前端或服务端自行猜测。新Key按UTF-8原始字节限制1～16,384字节，去除首尾空白后为空表示清除本地配置，非空值保留用户提交的原始字符串。配置JSON损坏时，自动日志清理仍按隐私优先使用30天默认保留期并记录不含配置原文的`invalid_config`警告，避免损坏配置导致日志永久保留。
 
 ### 13.4 持久状态机
 
@@ -309,17 +310,17 @@ Runner只从`queued/running`且`pause_requested=0/cancel_requested=0`的批次�
 3. `pause_requested=1`的批次保持任务原状态且Runner不领取；`retry_wait`保留原`next_retry_at`。
 4. 其余`interrupted`按原`ordinal`重新进入`queued`，不重置`attempt_count`；随后按上述汇总规则把有待执行Job的非暂停批次置为`queued`。
 
-429优先使用合法`Retry-After`，否则持久化2秒、4秒退避；408、超时、临时网络错误和500/502/503/504可重试；400/401/403/404直接失败。每个已确认批次中的Job最多3次真实HTTP请求，JSON或字段缺失/类型错误的纠正请求也计入`attempt_count`；纠正只允许一次，由`correction_attempted`持久记录。每次网络发送前必须先在SQLite事务中校验`attempt_count < 3`和取消标志，持久执行`attempt_count += 1`；若是纠正请求还要在同一事务先写`correction_attempted=1`，并插入`request_started`日志，提交成功后才允许发HTTP。崩溃发生在提交与实际发送之间时该次额度视为已消费，宁可少发一次也不得恢复后突破3次费用授权。暂停只设置批次`pause_requested=1/status=paused`并停止领取新任务，运行中请求允许完成；恢复清除标志，原`retry_wait`继续遵守时间。取消后不得自动重试。手动重试必须先生成`force`单目标预览并由用户再次确认费用上界，再消费该`preview_id`创建新的单Job批次；新Job的`manual_retry_count=原Job.manual_retry_count+1`，原Job和原批次保持终态不变。分析结果、日志、任务终态和批次汇总使用同一事务提交。
+429优先使用合法`Retry-After`，否则持久化2秒、4秒退避；408、超时、临时网络错误和500/502/503/504可重试；400/401/403/404直接失败。每个已确认批次中的Job最多3次真实HTTP请求，JSON或字段缺失/类型错误的纠正请求也计入`attempt_count`；纠正只允许一次，由`correction_attempted`持久记录。每次网络发送前必须先在SQLite事务中校验`attempt_count < 3`和取消标志，持久执行`attempt_count += 1`；若是纠正请求还要在同一事务先写`correction_attempted=1`，并插入`request_started`日志，提交成功后才允许发HTTP。崩溃发生在提交与实际发送之间时该次额度视为已消费，宁可少发一次也不得恢复后突破3次请求上限。暂停只设置批次`pause_requested=1/status=paused`并停止领取新任务，运行中请求允许完成；恢复清除标志，原`retry_wait`继续遵守时间。取消后不得自动重试。手动重试必须先生成`force`单目标预览并由用户再次确认请求范围，再消费该`preview_id`创建新的单Job批次；新Job的`manual_retry_count=原Job.manual_retry_count+1`，原Job和原批次保持终态不变。分析结果、日志、任务终态和批次汇总使用同一事务提交。
 
 ### 13.5 预览与付费确认
 
 预览注册表只存在Rust进程内存，默认10分钟TTL，不写SQLite；条目保存目标顺序、规范内容、哈希、估算和非密钥配置快照。`preview_id`不可猜测、只能成功消费一次。应用重启或TTL到期后必须重新预览。
 
-`enqueue_ai_analysis`开始即从注册表原子移除`preview_id`，无论复检或建库是否成功都不可重放；重新收集全部目标并逐一比较身份、顺序和哈希，任一变化则整批零写入。重复目标在预览阶段直接拒绝；零有效文档不得创建空批次。批次保存确认时会影响请求语义或费用的非密钥快照（provider/base_url/model/output_language/schema/prompt/timeout/价格与估算），后续设置变更不影响它；`concurrency`和`log_retention_days`明确是全局运行/清理策略，不进入批次快照，变更只影响Runner并发上限和日志清理时点，不改变已确认请求内容或费用上界。Key不进快照，Runner每次从Keyring读取当前值。`total_targets`是输入目标数，`valid_documents`是会建Job的数量，`missing_documents`只统计无文档，`skipped_targets`只统计因mode已是最新而跳过。Runner只能领取已持久化且批次未暂停、未取消的任务。预览和扫描不调用模型。
+`enqueue_ai_analysis`开始即从注册表原子移除`preview_id`，无论复检或建库是否成功都不可重放；重新收集全部目标并逐一比较身份、顺序和哈希，任一变化则整批零写入。重复目标在预览阶段直接拒绝；零有效文档不得创建空批次。批次保存确认时会影响请求语义的非密钥快照（provider/base_url/model/output_language/schema/prompt/timeout），后续设置变更不影响它；`concurrency`和`log_retention_days`明确是全局运行/清理策略，不进入批次快照，变更只影响Runner并发上限和日志清理时点。Runner从同一SQLite settings读取当前本地 Key，Key不进入批次快照。`total_targets`是输入目标数，`valid_documents`是会建Job的数量，`missing_documents`只统计无文档，`skipped_targets`只统计因mode已是最新而跳过。Runner只能领取已持久化且批次未暂停、未取消的任务。预览和扫描不调用模型。
 
-连接测试分为本地校验和可计费模型测试：`confirm_billable_request=false`时只校验配置和URL，不发网络请求；为`true`时发送不含Skill内容的最小completion，可能产生极小费用，UI必须提前提示。连接测试不创建Batch、Job、Analysis或AI日志，并在结果中返回`billable_request_sent`。
+连接测试分为本地校验和真实模型测试：`confirm_billable_request=false`时只校验配置和URL，不发网络请求；为`true`时发送不含Skill内容的最小completion，UI必须提前提示可能产生服务商费用。连接测试不创建Batch、Job、Analysis或AI日志，并在结果中返回`billable_request_sent`。
 
-Tauri管理一个`Arc<AiRuntimeState>`，仅持有10分钟TTL预览注册表、Runner控制信号和运行中取消句柄；不持有Key明文。AI Repository通过`SkillStore`新增的局部受控事务入口访问同一SQLite连接，不复制数据库文件或创建绕过迁移的独立连接。数据库和Keyring操作放入`spawn_blocking`，Provider使用异步`reqwest::Client`和可取消任务。
+Tauri管理一个`Arc<AiRuntimeState>`，仅持有10分钟TTL预览注册表、Runner控制信号和运行中取消句柄；本地 Key 只在配置读取、连接测试和单Job请求生命周期内使用。AI Repository通过`SkillStore`新增的局部受控事务入口访问同一SQLite连接，不复制数据库文件或创建绕过迁移的独立连接。数据库操作放入`spawn_blocking`，Provider使用异步`reqwest::Client`和可取消任务。
 
 ### 13.6 公开错误与DTO
 
@@ -341,22 +342,24 @@ AiCommandError {
 }
 ```
 
-前端不得依据`message`判断恢复动作。所有枚举使用`snake_case`，时间为Unix毫秒，Token非负，未知价格和费用为`null`。
+前端不得依据`message`判断恢复动作。所有枚举使用`snake_case`，时间为Unix毫秒，Token非负；旧价格/金额字段仅兼容读取，新响应不再返回。
 
 核心DTO字段冻结如下；Rust和TypeScript均使用相同`snake_case`序列化字段。`AiTargetRef`在Rust使用`#[serde(tag = "kind", rename_all = "snake_case")]`内部标签枚举，在TypeScript使用`kind`判别联合；有参数的Tauri Command统一只接受外层`input`参数，`input`内部字段保持`snake_case`，TS invoke包装不得自行改名：
 
 - `AiTargetRef`：三分支联合类型，字段严格等于13.1所列身份组件，不接受额外的绝对路径或前端生成`target_key`。
-- `AiConfigInput`：`provider/base_url/model/output_language: string`，`timeout_seconds: u32`，`concurrency: u8`，`log_retention_days: u16`，`input_price_micros_per_million/output_price_micros_per_million: i64|null`。
-- `AiConfigDto`：上述非密钥字段加`has_api_key/is_configured: bool`；绝不返回Key、掩码Key或可逆片段。
-- `AiApiKeyStatusDto`：`has_api_key: bool`。API Key不得进入React state、context、store、持久化、日志或调试快照；设置页使用非受控`password`输入和DOM ref，仅在提交瞬间读取一次并构造IPC参数，在`finally`清空DOM值和局部参数引用。IPC序列化及Rust Command/Keyring调用期间的瞬时内存是唯一受控例外；返回DTO、错误和测试输出不得包含Key、掩码Key或可逆片段。
+- `AiConfigInput`：`provider/base_url/model/output_language: string`，`timeout_seconds: u32`，`concurrency: u8`，`log_retention_days: u16`；旧价格字段仅兼容读取，不参与新请求。
+- `AiConfigDto`：上述配置字段加`api_key: string|null`、`has_api_key/is_configured: bool`；Key只从本地配置读取，不进入AI日志、任务快照或调试输出。
+- `AiApiKeyStatusDto`：`has_api_key: bool`，仅用于兼容旧命令；设置页使用受控`password`输入，默认掩码显示本地配置中的Key，眼睛按钮只切换当前输入的显示状态。
 - `AiProviderPresetDto`：`id/display_name/base_url: string`、`default_model: string|null`、`api_key_required: bool`。
-- `AiConnectionTestInput`：`config: AiConfigInput`、`confirm_billable_request: bool`，不含Key；Command只从Keyring读取当前Key。`AiConnectionTestDto`：`success: bool`、`provider/model/message: string`、`http_status: i64|null`、`latency_ms: i64`、`billable_request_sent: bool`。本地校验、配置、Keyring或内部错误返回`AiCommandError`；网络、认证和Provider HTTP失败返回`success=false`的DTO及脱敏message，成功返回`success=true`。前端只按`success/http_status`和结构化错误code决定动作，不解析message。
+- `AiModelListInput`：`config: AiConfigInput`、`api_key: string|null`；后端优先使用本次输入的 Key，没有输入时读取本地配置，Key不写入日志或响应。
+- `AiModelDto`：`id: string`；模型列表只返回去重后的非空模型 ID，不返回服务商原始响应。
+- `AiConnectionTestInput`：`config: AiConfigInput`、`api_key: string|null`、`confirm_billable_request: bool`；有输入时优先使用本次Key，没有输入时读取本地配置。`AiConnectionTestDto`：`success: bool`、`provider/model/message: string`、`http_status: i64|null`、`latency_ms: i64`、`billable_request_sent: bool`。本地校验、配置或内部错误返回`AiCommandError`；网络、认证和Provider HTTP失败返回`success=false`的DTO及脱敏message，成功返回`success=true`。前端只按`success/http_status`和结构化错误code决定动作，不解析message。
 - `AiAnalysisResultV1`：仅包含13.2八个业务字段；`schema_version/prompt_version`由外层详情DTO提供。
 - `AiPreviewItemDto`：`target`、`skill_name: string`、`document_filename/source_hash/content: string|null`、`character_count/estimated_input_tokens/estimated_output_tokens: i64`、`eligibility: ready|no_document|unreadable|skipped`、`error_code: string|null`。非ready项的文件名、哈希和正文为`null`，计数为0。
-- `AiAnalysisPreviewDto`：`preview_id: string`、`expires_at: i64`、`mode: missing_only|stale_only|missing_or_stale|force`、`total_targets/valid_documents/missing_documents/unreadable_documents/skipped_targets/total_characters/estimated_input_tokens/estimated_output_tokens: i64`、`estimated_cost_micros/estimated_max_retry_cost_micros: i64|null`、`provider/base_url/model/output_language: string`、`items: AiPreviewItemDto[]`。`content`就是实际待发送的主文档文本，五类目标计数必须满足13.3恒等式；两个金额分别按单次估算与第10节的3请求保守上界计算。
+- `AiAnalysisPreviewDto`：`preview_id: string`、`expires_at: i64`、`mode: missing_only|stale_only|missing_or_stale|force`、`total_targets/valid_documents/missing_documents/unreadable_documents/skipped_targets/total_characters/estimated_input_tokens/estimated_output_tokens: i64`、`provider/base_url/model/output_language: string`、`items: AiPreviewItemDto[]`。`content`就是实际待发送的主文档文本，五类目标计数必须满足13.3恒等式。
 - `AiAnalysisDetailDto`：`target`、`status: unconfigured|unparsed|queued|running|paused|failed|succeeded|stale|no_document|unreadable`、`skill_name/source_hash/current_source_hash: string|null`、`schema_version: i64|null`、`prompt_version/output_language/provider/model/one_line: string|null`、`result: AiAnalysisResultV1|null`、`input_tokens/output_tokens/total_tokens/analyzed_at: i64|null`、`active_job: AiJobDto|null`、`last_error: AiCommandError|null`。当Job本身仍是queued/retry_wait/interrupted但所属批次暂停时公开状态为`paused`；Collector读取失败且没有Job时返回`unreadable`，并由该次读取生成不落盘的`last_error(code=unreadable_document|invalid_utf8|unsafe_path|document_too_large)`。
 - `AiAnalysisSummaryDto`：`target`、`skill_name: string`、`status`（同详情DTO）、`one_line: string|null`、`when_to_use: string[]`、`source_hash: string|null`、`is_stale: bool`、`updated_at: i64|null`、`active_job_id/error_code/error_message: string|null`；列表回退逻辑仍由前端执行。
-- `AiBatchDto`：`id: string`、`status: queued|running|paused|cancelling|completed|cancelled`、`total_targets/valid_documents/missing_documents/unreadable_documents/skipped_targets/estimated_input_tokens/estimated_output_tokens: i64`、`estimated_cost_micros/estimated_max_retry_cost_micros: i64|null`、`jobs_queued/jobs_running/jobs_retry_wait/jobs_interrupted/jobs_succeeded/jobs_failed/jobs_cancelled/progress_completed/progress_total: i64`、`pause_requested/cancel_requested: bool`、`confirmed_at/created_at/updated_at: i64`、`finished_at: i64|null`。`progress_completed=jobs_succeeded+jobs_failed+jobs_cancelled`，`progress_total=valid_documents`；不返回提示词、Key或认证头。
+- `AiBatchDto`：`id: string`、`status: queued|running|paused|cancelling|completed|cancelled`、`total_targets/valid_documents/missing_documents/unreadable_documents/skipped_targets/estimated_input_tokens/estimated_output_tokens: i64`、`jobs_queued/jobs_running/jobs_retry_wait/jobs_interrupted/jobs_succeeded/jobs_failed/jobs_cancelled/progress_completed/progress_total: i64`、`pause_requested/cancel_requested: bool`、`confirmed_at/created_at/updated_at: i64`、`finished_at: i64|null`。`progress_completed=jobs_succeeded+jobs_failed+jobs_cancelled`，`progress_total=valid_documents`；不返回提示词、Key或认证头。
 - `AiJobDto`：`id/batch_id: string`、`ordinal: i64`、`target`、`skill_name: string`、`status: queued|running|retry_wait|interrupted|succeeded|failed|cancelled`、`attempt_count/manual_retry_count: i64`、`correction_attempted/cancel_requested: bool`、`next_retry_at: i64|null`、`error_code/error_message: string|null`、`created_at/updated_at: i64`、`started_at/finished_at: i64|null`。不返回文档正文、提示词或原始响应。
 - `AiQueueStatsDto`：`targets_total/targets_unparsed/targets_succeeded/targets_stale/targets_failed/targets_no_document/targets_unreadable/batches_queued/batches_running/batches_paused/batches_cancelling/batches_completed/batches_cancelled/jobs_queued/jobs_running/jobs_retry_wait/jobs_interrupted/jobs_succeeded/jobs_failed/jobs_cancelled: i64`，全部由后端扫描目标和持久状态计算，不接受前端计时值。
 - `AiLogSummaryDto`：`id/event_kind: string`、`job_id/batch_id: string|null`、`target: AiTargetRef|null`、`http_status/duration_ms: i64|null`、`error_code: string|null`、`created_at: i64`；`AiLogDetailDto`在此基础上增加`request_system_prompt/request_user_prompt/raw_response/error_message: string|null`和`input_tokens/output_tokens/total_tokens: i64|null`，所有字段保存前先脱敏。
@@ -365,7 +368,7 @@ AiCommandError {
 
 详情/摘要的公开状态按单一优先级计算：`no_document` > Collector错误=`unreadable` > 所属批次暂停的活动Job=`paused` > `running` > `queued/retry_wait/interrupted`统一为`queued` > 比最近成功结果更新的失败Job=`failed` > 有成功结果且信封不匹配=`stale` > 有成功结果=`succeeded` > 配置无效=`unconfigured` > `unparsed`。这样同一目标不会同时暴露多个主状态；辅助字段仍可展示过期结果或失败详情。
 
-`AiConfigDto`只返回`has_api_key`，绝不返回Key本身；批次和任务DTO返回持久状态，不返回内部提示词或原始响应。未知枚举或不合法数值必须返回`validation`错误，不做静默默认。
+`AiConfigDto`返回本地配置中的Key供设置页掩码编辑；批次和任务DTO返回持久状态，不返回内部提示词或原始响应。未知枚举或不合法数值必须返回`validation`错误，不做静默默认。
 
 ### 13.7 Tauri Commands
 
@@ -374,7 +377,8 @@ AiCommandError {
 ```text
 get_ai_provider_presets() -> AiProviderPresetDto[]
 get_ai_config() -> AiConfigDto
-save_ai_config(input: AiConfigInput) -> AiConfigDto
+get_ai_models(input: AiModelListInput) -> AiModelDto[]
+save_ai_config(input: { config: AiConfigInput, api_key: string }) -> AiConfigDto
 get_ai_api_key_status() -> AiApiKeyStatusDto
 set_ai_api_key(input: { api_key }) -> AiApiKeyStatusDto
 delete_ai_api_key() -> AiApiKeyStatusDto
@@ -418,7 +422,7 @@ clear_ai_analysis_logs() -> { deleted_count }
 
 所有权只约束“同一文件同一时间只有一个实际写入者”，不要求使用子代理：主会话可直接实现，也可按需委派子代理；下文中的“实现Agent”均指实际执行者。
 
-阶段1 Rust数据实现者（主会话或子代理）独占：`src-tauri/src/core/migrations.rs`、`src-tauri/src/core/skill_store.rs`、`src-tauri/src/core/ai/{mod,types,repository}.rs`、`src-tauri/src/core/mod.rs`；完成可编译的数据模块后交接。随后Rust服务实现者独占接管`src-tauri/src/core/ai/mod.rs`并新增`src-tauri/src/core/ai/{config,secret_store,provider,logs}.rs`，同时独占`src-tauri/src/commands/ai.rs`、`src-tauri/src/commands/mod.rs`、`src-tauri/src/lib.rs`，由它在新文件存在后串行完成模块声明和Command接线。阶段1 React实现者在后端DTO冻结实现后独占：`src/lib/tauri.ts`、`src/lib/error.ts`、`src/components/ai/AiSettingsSection.tsx`、`src/views/Settings.tsx`、`src/i18n/{zh,en,zh-TW}.json`。
+阶段1 Rust数据实现者（主会话或子代理）独占：`src-tauri/src/core/migrations.rs`、`src-tauri/src/core/skill_store.rs`、`src-tauri/src/core/ai/{mod,types,repository}.rs`、`src-tauri/src/core/mod.rs`；完成可编译的数据模块后交接。随后Rust服务实现者独占接管`src-tauri/src/core/ai/mod.rs`并新增`src-tauri/src/core/ai/{config,provider,logs}.rs`，同时独占`src-tauri/src/commands/ai.rs`、`src-tauri/src/commands/mod.rs`、`src-tauri/src/lib.rs`，由它在新文件存在后串行完成模块声明和Command接线。阶段1 React实现者在后端DTO冻结实现后独占：`src/lib/tauri.ts`、`src/lib/error.ts`、`src/components/ai/AiSettingsSection.tsx`、`src/views/Settings.tsx`、`src/i18n/{zh,en,zh-TW}.json`。
 
 阶段2由阶段1数据实现者先完成交接，随后Rust服务实现者独占：`src-tauri/Cargo.toml`及必要时由同一feature变化生成的`src-tauri/Cargo.lock`（仅为现有reqwest启用有界流读取feature，不引入未批准的新Provider依赖）、`src-tauri/src/core/ai/{mod,repository,document,prompt,schema,service,preview,runner}.rs`、`src-tauri/src/commands/ai.rs`、`src-tauri/src/commands/mod.rs`、`src-tauri/src/lib.rs`及同目录定向测试。阶段2实现能创建/领取Job、重试、恢复和提交多表事务的Repository接口，形成真实单个解析闭环；阶段4只扩展并发批量控制、批次操作和管理查询。阶段2 React实现者在后端交接后独占`src/lib/tauri.ts`，只增加协议包装，不接详情UI。
 

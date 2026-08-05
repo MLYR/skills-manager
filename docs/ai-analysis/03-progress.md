@@ -486,3 +486,45 @@
 处理决策：移除无依据的 3 秒超时，统计在真实命令返回前保持加载状态，只有命令真正失败才显示不可用；批次、任务和日志链路不依赖统计结果。解析目标摘要独立加载，点击一键解析时重新读取并展示已解析/未解析数。后端 enqueue 再次按 `missing_only` 复核当前状态，已解析、失败、过期和活动任务均不会进入实际请求。
 
 验证结果：`cargo test --manifest-path src-tauri/Cargo.toml commands::ai -- --nocapture` 10 passed、`cargo check --manifest-path src-tauri/Cargo.toml`通过、`npx tsc -b --pretty false`通过、`npm run lint`通过、`rustfmt --edition 2021 --check src-tauri/src/commands/ai.rs`通过、`git diff --check`通过。统计真实返回耗时需在桌面应用环境复测；未启动/构建前端。
+
+## 20. AI 配置 Key 交互调整（2026-08-05，已完成，策略已被第21节覆盖）
+
+用户希望移除独立的 Key 保存/删除按钮，将保存动作合并到页面底部的“保存配置”，并增加默认掩码和眼睛显示/隐藏入口。
+
+处理决策：按已冻结的安全契约，API Key 仍只写入系统钥匙串，不改为 SQLite、前端状态或普通配置存储；底部保存配置按钮在检测到本次输入的新 Key 时调用既有 Keyring Command，空输入保留已有 Key。已保存 Key 只显示为 `********` 掩码，眼睛按钮只切换本次输入内容，避免前端获取或回显钥匙串中的完整 Key。独立保存/删除按钮已移除，三语文案同步更新。
+
+验证结果：`npx tsc -b --pretty false`通过、`npm run lint`通过、三语`settings.ai`键集合96个且同构、`git diff --check`通过。未启动/构建前端；启动、构建、打包命令仍分别为`npm run dev`、`npm run build`、`npm run tauri:build`。
+
+## 21. API Key 改为应用本地普通存储（2026-08-05，进行中）
+
+用户明确要求“不再写入系统钥匙串，改为普通存储”。本节决策覆盖第20节原有的钥匙串实现：API Key 与 AI 配置一起保存在应用本地 SQLite `settings` 的 `ai_analysis_config_v1` JSON 中，沿用现有 settings 本地加密；不再从系统钥匙串读取或写入。设置页读取本地 Key 后以密码掩码显示，连接测试优先使用本次输入的 Key，批量 Runner 从同一 settings 读取当前 Key。AI 日志、批次快照、任务DTO和调试输出仍不得包含 Key。
+
+当前负责人：主会话。范围：`src-tauri/src/core/ai/config.rs`、`commands/ai.rs`、`core/ai/service.rs`、`core/ai/types.rs`、`core/ai/mod.rs`、`core/skill_store.rs`、`src/lib/tauri.ts`、`src/components/ai/AiSettingsSection.tsx`、三语 i18n、相关文档。
+
+实现与验收：移除 AI 专用 `SecretStore` 模块；`ai_analysis_config_v1` 加入 settings 本地加密白名单并兼容旧无 Key JSON；设置页默认以密码掩码回显本地 Key，保存配置同时保存/清除 Key，真实连接测试优先使用当前输入值，Runner 从 settings 读取当前 Key。`rtk cargo test --manifest-path src-tauri/Cargo.toml`：480 passed；`rtk cargo check --manifest-path src-tauri/Cargo.toml`通过；`rtk npx tsc -b --pretty false`通过；`rtk npm run lint`通过；相关 Rust 文件 `rustfmt --check`通过；`rtk git diff --check`通过；AI 路径无 `SecretStore`/系统钥匙串调用残留。阶段状态：已完成。
+
+## 22. 移除价格配置与金额统计（2026-08-05，已完成）
+
+用户要求删除设置页“输入价格/输出价格（微单位 / 百万 Token）”，AI 解析只统计输入、输出和实际返回的 Token，不再计算或展示金额。兼容策略：旧配置和v8数据库中的价格/金额字段仍可读取，保存新配置和创建新批次时统一清空/写入 `NULL`，不再参与校验、预览或批次统计。
+
+范围：`AiSettingsSection`、`AiAnalysisPreviewDialog`、三语 i18n、AI 配置/预览/批次 DTO、预览 Token 服务和相关文档。负责人：主会话。
+
+实现与验收：设置页价格字段已移除；预览弹窗只显示字符数和输入/输出 Token；后端删除金额估算函数，新配置不再保存旧价格字段，新批次金额字段写入 `NULL`，旧v8数据库列保留兼容。`rtk cargo test --manifest-path src-tauri/Cargo.toml`：478 passed；`rtk cargo test --manifest-path src-tauri/Cargo.toml core::ai:: -- --nocapture`：65 passed；`rtk npx tsc -b --pretty false`、`rtk npm run lint`、相关 Rust `rustfmt --check`、i18n JSON 校验和 `rtk git diff --check`均通过。阶段状态：已完成。
+
+## 23. 服务商模型列表下拉选择（2026-08-05，进行中）
+
+用户希望设置页的模型不再只能手动填写，而是可以通过当前服务商接口获取后从下拉建议中选择。
+
+范围：`src-tauri/src/core/ai/provider.rs`、`src-tauri/src/core/ai/types.rs`、`src-tauri/src/commands/ai.rs`、`src-tauri/src/lib.rs`、`src/lib/tauri.ts`、`src/components/ai/AiSettingsSection.tsx`、三语 i18n、`01-overall-plan.md`。负责人：主会话。
+
+约束：只允许 Rust 后端请求 `GET {base_url}models`；优先使用设置页本次输入的 Key；响应仅保留 `data[].id`，不保存原始响应、不写 AI 日志、不创建解析任务；获取失败保留当前模型并允许继续手动保存，避免兼容服务暂不支持 `/models` 时阻塞配置。
+
+实现与验收：新增 `get_ai_models` Tauri Command、模型 DTO 和 OpenAI Compatible `/models` GET 请求；设置页获取到模型后使用原生 `select` 下拉框完整展示候选，支持刷新、加载中、空列表、失败提示和手动输入回退，Provider/Base URL 变化会清空旧候选；自定义服务商尚未填写模型时也可先刷新候选。后端对模型 ID 去重排序，认证失败、限流、超时、5xx、非法 JSON 和错误响应结构均返回结构化错误，不记录响应或凭据。`rtk cargo test --manifest-path src-tauri/Cargo.toml model_list -- --nocapture`：4 passed；`rtk cargo test --manifest-path src-tauri/Cargo.toml models_request -- --nocapture`：1 passed；`rtk cargo test --manifest-path src-tauri/Cargo.toml`：483 passed（40.96秒）；`rtk cargo check --manifest-path src-tauri/Cargo.toml`、相关 Rust `rustfmt --check`、`rtk npx tsc -b --pretty false`、`rtk npm run lint`、三语 `settings.ai` 键集合一致（92个）和 `rtk git diff --check`均通过。未启动/构建前端；启动、构建、打包命令仍分别为 `npm run dev`、`npm run build`、`npm run tauri:build`。阶段状态：已完成。
+
+## 24. 模型候选下拉显示修复（2026-08-05，已完成）
+
+问题：模型列表统计显示已获取多个模型，但原生 `datalist` 会按输入框当前文本过滤候选，导致用户展开时看不到完整列表。
+
+处理决策：获取到非空模型列表后改用真正的 `select` 下拉框，完整展示所有去重后的模型；获取前、空列表或刷新失败时继续使用手动输入框，保留配置回退能力；当前已保存但不在远端列表中的模型作为额外选项保留。
+
+验证结果：`rtk npx tsc -b --pretty false`、`rtk npm run lint`、三语 `settings.ai` 键集合一致（92个）、`rtk git diff --check`均通过。未启动/构建前端；启动、构建、打包命令仍分别为 `npm run dev`、`npm run build`、`npm run tauri:build`。验收结论：通过。
