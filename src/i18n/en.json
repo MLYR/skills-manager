@@ -662,7 +662,7 @@
     "detectedAgents": "Detected",
     "enabledAgents": "Enabled",
     "customAgents": "Custom",
-    "builtInAgents": "Built-in Agents",
+    "builtInAgents": "Active Agents",
     "moreAgentsSection": "More Agents ({{count}})",
     "customAgentsSection": "Custom Agents",
     "refresh": "Refresh",

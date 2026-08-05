@@ -66,22 +66,6 @@ import type { Theme } from "../hooks/useTheme";
 
 const IS_WINDOWS = navigator.userAgent.includes("Windows");
 
-const MAINSTREAM_AGENT_KEYS = new Set([
-  "claude_code",
-  "cursor",
-  "codex",
-  "grok",
-  "gemini_cli",
-  "github_copilot",
-  "opencode",
-  "hermes",
-  "openclaw",
-  "windsurf",
-  "kiro",
-  "antigravity",
-  "amp",
-]);
-
 const SETTINGS_SECTION_IDS = [
   "agents",
   "global-config",
@@ -824,12 +808,13 @@ export function Settings() {
   ] as const;
   const customTools = useMemo(() => tools.filter((tool) => tool.is_custom), [tools]);
   const builtInTools = useMemo(() => tools.filter((tool) => !tool.is_custom), [tools]);
-  const mainstreamTools = useMemo(
-    () => builtInTools.filter((tool) => MAINSTREAM_AGENT_KEYS.has(tool.key)),
+  // 已安装的内建 Agent 优先展示，未安装项默认收进“更多 Agent”，避免顶部被未使用的 Agent 占满。
+  const activeBuiltInTools = useMemo(
+    () => builtInTools.filter((tool) => tool.installed),
     [builtInTools]
   );
-  const secondaryTools = useMemo(
-    () => builtInTools.filter((tool) => !MAINSTREAM_AGENT_KEYS.has(tool.key)),
+  const moreBuiltInTools = useMemo(
+    () => builtInTools.filter((tool) => !tool.installed),
     [builtInTools]
   );
 
@@ -1270,10 +1255,10 @@ export function Settings() {
             <div>
               <div className="mb-2 flex items-center justify-between gap-2">
                 <h3 className="text-[13px] font-medium text-secondary">{t("settings.builtInAgents")}</h3>
-                <span className="text-[12px] text-muted">{mainstreamTools.length}</span>
+                <span className="text-[12px] text-muted">{activeBuiltInTools.length}</span>
               </div>
               <AgentGroupDnd
-                items={mainstreamTools}
+                items={activeBuiltInTools}
                 sensors={dragSensors}
                 dragLabel={t("settings.dragToReorder")}
                 onDragEnd={handleAgentDragEnd}
@@ -1281,7 +1266,7 @@ export function Settings() {
               />
             </div>
 
-            {secondaryTools.length > 0 && (
+            {moreBuiltInTools.length > 0 && (
               <div>
                 <button
                   type="button"
@@ -1289,11 +1274,11 @@ export function Settings() {
                   className="mb-2 inline-flex items-center gap-1.5 text-[13px] font-medium text-muted transition-colors hover:text-secondary outline-none"
                 >
                   {showMoreAgents ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
-                  {t("settings.moreAgentsSection", { count: secondaryTools.length })}
+                  {t("settings.moreAgentsSection", { count: moreBuiltInTools.length })}
                 </button>
                 {showMoreAgents && (
                   <AgentGroupDnd
-                    items={secondaryTools}
+                    items={moreBuiltInTools}
                     sensors={dragSensors}
                     dragLabel={t("settings.dragToReorder")}
                     onDragEnd={handleAgentDragEnd}

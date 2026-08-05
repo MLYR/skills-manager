@@ -662,7 +662,7 @@
     "detectedAgents": "已检测",
     "enabledAgents": "已启用",
     "customAgents": "自定义",
-    "builtInAgents": "内建 Agent",
+    "builtInAgents": "已启动 Agent",
     "moreAgentsSection": "更多 Agent（{{count}}）",
     "customAgentsSection": "自定义 Agent",
     "refresh": "重新检测",

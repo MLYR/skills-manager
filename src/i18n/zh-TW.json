@@ -614,7 +614,7 @@
     "detectedAgents": "已偵測",
     "enabledAgents": "已啟用",
     "customAgents": "自訂",
-    "builtInAgents": "內建 Agent",
+    "builtInAgents": "已啟動 Agent",
     "moreAgentsSection": "更多 Agent（{{count}}）",
     "customAgentsSection": "自訂 Agent",
     "refresh": "重新偵測",
