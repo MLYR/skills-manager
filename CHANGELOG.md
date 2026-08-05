@@ -5,6 +5,47 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.28.5] - 2026-08-04
+
+### Release Overview
+- Update checks no longer hold the skills repository while they talk to the network, so an install, update, or relink started at the same time stops failing with "repository is busy" — and "check all updates" itself got substantially faster. Plus a round of tag-filter fixes for lists that could go silently empty with no way back.
+
+### User-facing
+- **"Skills repository is busy" during an update check is fixed** — Checking for updates asks each remote for its newest revision, which can take 30–57 seconds when the query is throttled. That entire round-trip ran while holding the central-repo lock, so anything you started meanwhile — install, update, relink — waited 20 seconds and then failed with `skills repository is busy`. All four check paths (check all, single skill, the tray's "check for updates", and each background auto-update round) now resolve remotes *before* taking the lock, which is then held only for the status write. (#315)
+- **"Check all updates" is much faster** — Remotes were queried one at a time, so a single slow remote stalled the whole batch. They are now resolved concurrently (up to 8 at once) and deduplicated per remote: skills installed from different subdirectories of one monorepo cost one query in total instead of one each.
+- **Deleting a tag's last skill no longer empties the list for good** — The tag's pill disappeared while its filter stayed active, so the list silently rendered empty with no visible filter left to turn off. Stale filters are now dropped automatically in My Skills, Workspace, and a project's detail page. (#318)
+- **The same fix for "Untagged"** — That pill is conditional too, so filtering by Untagged and then deleting every untagged skill hit the identical dead end.
+- **My Skills can clear its filters** — It was the only list without a reset control, so any filter combination matching nothing was a dead end. Its empty state now offers "Clear filters" whenever a filter is active.
+- **Renaming a tag keeps your filter** — The filter followed the rename, then was dropped a moment later because the tag list refreshes asynchronously.
+- **Switching projects no longer shows another project's skills** — A slow skill scan's response could land after you had already moved to a different project, swapping its skills in under the current route.
+
+### Developer & Governance
+- The batch update check is now two phases: resolve every distinct remote once — keyed by `(clone_url, branch)`, bounded at 8 concurrent `git ls-remote` calls — off the central-repo lock, then take the lock per skill only to write the status columns. `resolve_remote_revision` is safe to run concurrently: it shells out to `git ls-remote`, and its libgit2 fallback builds a fresh uuid-named bare repo per call.
+- Splitting resolve from apply opened a race the merged PR did not cover: a reinstall keeps a skill's row and repoints its source (`update_skill_after_reinstall`), so a revision read from the old remote could be written against the new one. Every prefetched revision now carries the `(clone_url, branch)` it was resolved for, and the apply side re-derives that key from the freshly read record and discards anything that no longer matches.
+- `check_skill_update_internal_with_remote` is network-free by contract — a skill with no usable prefetch is deferred to the next round rather than resolved inline, which would have put an `ls-remote` back under the lock at the check-TTL boundary. `check_skill_update_internal` is now `prefetch_skill_remote` plus that apply step, and its contract is that the caller does not hold the lock (only the CLI's `check` uses it).
+- `pruneStaleTagFilters` returns the same Set reference when nothing is stale (avoiding a re-render loop), skips pruning while the skill list is empty (an empty list says nothing about which tags are valid), and counts tags carried by a loaded skill as available — which is what closes the rename window. `ProjectDetail`'s skill load gained the request-id guard `WorkspaceView` already used.
+- Rust test suite at 401 passing, including new coverage for the prefetch key check, the failed-prefetch status write, and the concurrent resolution contract.
+
+## [1.28.4] - 2026-08-04
+
+### Release Overview
+- Interface consistency pass: a skill card now looks and behaves the same on every page, Settings and Backup adopt the shared controls, and a skill with a pending update is no longer indistinguishable from an up-to-date one in multi-select.
+
+### User-facing
+- **The skill card is one card again** — My Skills, Workspace, and a project's detail page each drew the same object differently. All of them now share one layout: a fixed leading slot that holds the status dot, the drag handle on hover, or the multi-select checkbox (so the title never shifts), the name, an amber "update" pill when one is pending, and a switch pinned to the top-right. The grid card's floating hover toolbar — which used to cover the skill name — is gone; drag, update, and delete moved into a "…" overflow menu, and deleting now asks for confirmation instead of acting immediately.
+- **A pending update stays visible while selecting** — In multi-select, the grid card hid the header update pill *and* suppressed the body badge, so a skill with an update looked exactly like one without. The badge now appears whenever the pill is hidden.
+- **A partially enabled skill no longer reads as disabled** — On a project page, a skill whose variants are only partly enabled showed as fully off. Its status dot is now amber for that in-between state, and the whole card no longer dims.
+- **Settings matches the rest of the app** — Row headings, help text, spacing, and dividers follow the same scale as every other page. Booleans that take effect immediately (tray icon, Git engine) are switches rather than checkboxes, language is a segmented control, and agent cards put their switch at the right edge and keep equal height whether or not the agent is installed. The redundant "enabled / disabled" pill is gone — the switch already says it; "not installed" stays, since the switch cannot express it.
+- **Behavior change: the "default startup preset" setting is removed** — It overrode whichever preset was active on every launch. Startup now simply restores the preset you last had active.
+- **Consistent corners across dialogs, sheets, and the sidebar** — Buttons, inputs, and navigation rows inside modals were noticeably squarer than the pages behind them; they now use the same radius scale.
+
+### Developer & Governance
+- The card rework introduces `CardActionMenu` (replacing the standalone `DeleteSkillButton`, which routed deletion outside `ConfirmDialog`) and three card tokens — `--color-border-faint`, `--shadow-card`, `--shadow-card-hover`. `ToggleSwitch` gained a `loading` prop so the agent toggle and Backup's auto-backup row keep their in-flight spinner; it replaced the last two private 28×16 switches with hardcoded emerald/zinc colors. An open card menu lifts its wrapper to `z-30`, because the card's hover transform creates a stacking context that would otherwise clip it.
+- Settings' local `fieldClass` / `actionButtonClass` / `segmentedButtonClass` constants now compose `.app-input` / `.app-button-secondary` / `.app-segmented-button` instead of redefining them at different sizes and radii.
+- Removing the default-startup-preset setting required deleting all three readers, not just the UI row: `ensure_default_startup_scenario` read `default_scenario` on every launch, so dropping only the frontend would have locked users into a preset with no way to change it. The CLI now falls back to the first preset. The stored settings row is left in place as inert data.
+- Arbitrary radii across `src/` drop from 101 to 27; the remainder are Agent icon cells (spec'd at `rounded-[4px]`, and three drifted cells are corrected here) and `HelpDialog`'s deliberate `rounded-[28px]`.
+- READMEs gained a Trendshift badge.
+- Backend Rust suite at 393 passing; frontend `npm run build` clean.
 ## [1.28.3] - 2026-07-13
 
 ### Release Overview

@@ -15,6 +15,7 @@ export default {
         'surface-active': 'var(--color-surface-active)',
         border: 'var(--color-border)',
         'border-subtle': 'var(--color-border-subtle)',
+        'border-faint': 'var(--color-border-faint)',
         accent: {
           DEFAULT: 'var(--color-accent)',
           light: 'var(--color-accent-light)',
@@ -26,6 +27,10 @@ export default {
           DEFAULT: 'var(--color-danger)',
           bg: 'var(--color-danger-bg)',
         },
+      },
+      boxShadow: {
+        card: 'var(--shadow-card)',
+        'card-hover': 'var(--shadow-card-hover)',
       },
       textColor: {
         primary: 'var(--color-text-primary)',

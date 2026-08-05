@@ -292,7 +292,7 @@ function AddSkillsSheetBody({ onClose, target, managedSkills, onInstalled }: Pro
             displayName={agent.display_name}
             className={cn(
               dim,
-              "rounded-[6px] border border-bg-secondary bg-surface shadow-[0_0_0_1px_var(--color-border-subtle)]",
+              "rounded-[4px] border border-bg-secondary bg-surface shadow-[0_0_0_1px_var(--color-border-subtle)]",
             )}
           />
         ))}
@@ -300,7 +300,7 @@ function AddSkillsSheetBody({ onClose, target, managedSkills, onInstalled }: Pro
           <span
             className={cn(
               dim,
-              "inline-flex items-center justify-center rounded-[6px] border border-bg-secondary bg-surface text-[10px] font-semibold text-muted shadow-[0_0_0_1px_var(--color-border-subtle)]",
+              "inline-flex items-center justify-center rounded-[4px] border border-bg-secondary bg-surface text-[10px] font-semibold text-muted shadow-[0_0_0_1px_var(--color-border-subtle)]",
             )}
             title={`+${hiddenCount}`}
           >
@@ -517,7 +517,7 @@ function AddSkillsSheetBody({ onClose, target, managedSkills, onInstalled }: Pro
           <button
             onClick={onClose}
             disabled={installing}
-            className="shrink-0 rounded-[4px] p-1.5 text-muted transition-colors hover:bg-surface-hover hover:text-secondary disabled:opacity-50"
+            className="shrink-0 rounded-md p-1.5 text-muted transition-colors hover:bg-surface-hover hover:text-secondary disabled:opacity-50"
           >
             <X className="h-4 w-4" />
           </button>

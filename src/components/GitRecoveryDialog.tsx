@@ -114,7 +114,7 @@ export function GitRecoveryDialog({ open, reason, onClose, onReclone }: Props) {
           <button
             onClick={() => !loading && onClose()}
             disabled={!!loading}
-            className="px-3 py-1.5 rounded-[4px] text-[13px] font-medium text-tertiary hover:text-secondary hover:bg-surface-hover transition-colors outline-none disabled:opacity-50"
+            className="px-3 py-1.5 rounded-lg text-[13px] font-medium text-tertiary hover:text-secondary hover:bg-surface-hover transition-colors outline-none disabled:opacity-50"
           >
             {t("common.cancel")}
           </button>

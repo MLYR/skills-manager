@@ -36,7 +36,7 @@ export function DetailSheet({
       <div className="absolute inset-0 z-10 flex min-h-0 flex-col overflow-hidden border-l border-border-subtle bg-bg-secondary">
         <button
           onClick={onClose}
-          className="absolute top-4 right-5 z-10 shrink-0 rounded-[4px] p-1.5 text-muted transition-colors outline-none hover:bg-surface-hover hover:text-secondary"
+          className="absolute top-4 right-5 z-10 shrink-0 rounded-md p-1.5 text-muted transition-colors outline-none hover:bg-surface-hover hover:text-secondary"
         >
           <X className="h-4 w-4" />
         </button>

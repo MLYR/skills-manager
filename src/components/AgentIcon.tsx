@@ -25,7 +25,7 @@ export function AgentIcon({
   return (
     <span
       className={cn(
-        "inline-flex shrink-0 items-center justify-center overflow-hidden rounded-[6px] border border-border-subtle bg-surface",
+        "inline-flex shrink-0 items-center justify-center overflow-hidden rounded-md border border-border-subtle bg-surface",
         className
       )}
       title={displayName}

@@ -116,7 +116,7 @@ export function AddProjectDialog({ open, onClose, onAdded }: Props) {
   };
 
   const inputClass =
-    "w-full bg-background border border-border-subtle rounded-[4px] px-3 py-2 text-[13px] text-secondary focus:outline-none focus:border-border transition-all placeholder-faint";
+    "w-full bg-background border border-border-subtle rounded-lg px-3 py-2 text-[13px] text-secondary focus:outline-none focus:border-border transition-all placeholder-faint";
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center">
@@ -185,7 +185,7 @@ export function AddProjectDialog({ open, onClose, onAdded }: Props) {
               />
               <button
                 onClick={handleSelectBrowse}
-                className="px-2.5 rounded-[4px] border border-border-subtle bg-background text-muted hover:text-secondary hover:border-border transition-all outline-none"
+                className="px-2.5 rounded-lg border border-border-subtle bg-background text-muted hover:text-secondary hover:border-border transition-all outline-none"
                 title={t("project.scanDir")}
               >
                 <FolderOpen className="w-4 h-4" />
@@ -193,7 +193,7 @@ export function AddProjectDialog({ open, onClose, onAdded }: Props) {
               <button
                 onClick={handleScan}
                 disabled={!scanRoot.trim() || scanning}
-                className="px-3 py-1.5 rounded-[4px] bg-accent-dark hover:bg-accent text-white text-[13px] font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed border border-accent-border outline-none"
+                className="px-3 py-1.5 rounded-lg bg-accent-dark hover:bg-accent text-white text-[13px] font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed border border-accent-border outline-none"
               >
                 {scanning ? (
                   t("project.scanning")
@@ -260,7 +260,7 @@ export function AddProjectDialog({ open, onClose, onAdded }: Props) {
                   <button
                     onClick={handleAddSelected}
                     disabled={selected.size === 0 || adding}
-                    className="px-3 py-1.5 rounded-[4px] bg-accent-dark hover:bg-accent text-white text-[13px] font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed border border-accent-border outline-none"
+                    className="px-3 py-1.5 rounded-lg bg-accent-dark hover:bg-accent text-white text-[13px] font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed border border-accent-border outline-none"
                   >
                     {adding
                       ? t("common.loading")
@@ -295,7 +295,7 @@ export function AddProjectDialog({ open, onClose, onAdded }: Props) {
                   const dir = await dialogOpen({ directory: true, multiple: false });
                   if (dir) setLinkedPath(dir as string);
                 }}
-                className="px-2.5 rounded-[4px] border border-border-subtle bg-background text-muted hover:text-secondary hover:border-border transition-all outline-none"
+                className="px-2.5 rounded-lg border border-border-subtle bg-background text-muted hover:text-secondary hover:border-border transition-all outline-none"
                 title={t("project.selectSkillsDir")}
               >
                 <FolderOpen className="w-4 h-4" />

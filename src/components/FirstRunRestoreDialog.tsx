@@ -75,7 +75,7 @@ export function FirstRunRestoreDialog() {
       <div className="absolute inset-0 bg-black/70 backdrop-blur-sm" />
       <div className="relative z-10 w-full max-w-lg rounded-xl border border-border bg-surface p-5 shadow-2xl">
         <div className="flex items-start gap-3">
-          <div className="mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-[6px] border border-border-subtle bg-bg-secondary">
+          <div className="mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-md border border-border-subtle bg-bg-secondary">
             <CloudDownload className="h-5 w-5 text-muted" />
           </div>
           <div className="min-w-0">
@@ -95,7 +95,7 @@ export function FirstRunRestoreDialog() {
             }}
             placeholder={t("settings.gitRemoteUrlPlaceholder")}
             disabled={busy}
-            className="mt-1.5 h-8 w-full rounded-[4px] border border-border-subtle bg-background px-2.5 font-mono text-[13px] text-secondary outline-none transition-colors focus:border-border disabled:opacity-50"
+            className="mt-1.5 h-8 w-full rounded-lg border border-border-subtle bg-background px-2.5 font-mono text-[13px] text-secondary outline-none transition-colors focus:border-border disabled:opacity-50"
             autoCapitalize="none"
             autoCorrect="off"
             spellCheck={false}
@@ -112,7 +112,7 @@ export function FirstRunRestoreDialog() {
             type="button"
             onClick={dismiss}
             disabled={busy}
-            className="inline-flex items-center gap-1.5 rounded-[4px] px-3 py-1.5 text-[13px] font-medium text-tertiary transition-colors hover:bg-surface-hover hover:text-secondary disabled:opacity-50 outline-none"
+            className="inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-[13px] font-medium text-tertiary transition-colors hover:bg-surface-hover hover:text-secondary disabled:opacity-50 outline-none"
           >
             <Sparkles className="h-3.5 w-3.5" />
             {t("firstRun.startFresh")}
@@ -121,7 +121,7 @@ export function FirstRunRestoreDialog() {
             type="button"
             onClick={handleRestore}
             disabled={busy || !url.trim()}
-            className="inline-flex items-center gap-1.5 rounded-[4px] border border-accent-border bg-accent-dark px-3 py-1.5 text-[13px] font-medium text-white transition-colors hover:bg-accent disabled:cursor-not-allowed disabled:opacity-50 outline-none"
+            className="inline-flex items-center gap-1.5 rounded-lg border border-accent-border bg-accent-dark px-3 py-1.5 text-[13px] font-medium text-white transition-colors hover:bg-accent disabled:cursor-not-allowed disabled:opacity-50 outline-none"
           >
             {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <CloudDownload className="h-3.5 w-3.5" />}
             {busy ? t("firstRun.restoring") : t("firstRun.restore")}

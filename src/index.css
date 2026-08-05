@@ -13,6 +13,9 @@
     --color-surface-active: #E4E4E7;
     --color-border: #D4D4D8;
     --color-border-subtle: #E4E4E7;
+    --color-border-faint: #EEEEF0;
+    --shadow-card: 0 1px 2px rgba(24, 24, 27, 0.04);
+    --shadow-card-hover: 0 4px 12px rgba(24, 24, 27, 0.07);
     --color-text-primary: #18181B;
     --color-text-secondary: #27272A;
     --color-text-tertiary: #52525B;
@@ -36,6 +39,9 @@
     --color-surface-active: #1E1E28;
     --color-border: #222229;
     --color-border-subtle: #1C1C22;
+    --color-border-faint: #18181E;
+    --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.3);
+    --shadow-card-hover: 0 4px 14px rgba(0, 0, 0, 0.45);
     --color-text-primary: #F4F4F5;
     --color-text-secondary: #D4D4D8;
     --color-text-tertiary: #A1A1AA;

@@ -1702,14 +1702,6 @@ fn replacement_preset_after_deactivate(
     deactivated_id: &str,
 ) -> anyhow::Result<Option<app_lib::core::skill_store::ScenarioRecord>> {
     let scenarios = store.get_all_scenarios()?;
-    if let Some(default_id) = store.get_setting("default_scenario")? {
-        if default_id != deactivated_id {
-            if let Some(default) = scenarios.iter().find(|scenario| scenario.id == default_id) {
-                return Ok(Some(default.clone()));
-            }
-        }
-    }
-
     Ok(scenarios
         .into_iter()
         .find(|scenario| scenario.id != deactivated_id))

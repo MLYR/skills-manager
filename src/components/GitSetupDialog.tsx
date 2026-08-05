@@ -84,14 +84,14 @@ export function GitSetupDialog({ open, hasRemote, onClose, onClone, onInit }: Pr
           <button
             onClick={() => !loading && onClose()}
             disabled={loading}
-            className="px-3 py-1.5 rounded-[4px] text-[13px] font-medium text-tertiary hover:text-secondary hover:bg-surface-hover transition-colors outline-none disabled:opacity-50"
+            className="px-3 py-1.5 rounded-lg text-[13px] font-medium text-tertiary hover:text-secondary hover:bg-surface-hover transition-colors outline-none disabled:opacity-50"
           >
             {t("common.cancel")}
           </button>
           <button
             onClick={handleConfirm}
             disabled={loading || !hasRemote}
-            className="px-3 py-1.5 rounded-[4px] bg-accent-dark hover:bg-accent text-white text-[13px] font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed border border-accent-border outline-none"
+            className="px-3 py-1.5 rounded-lg bg-accent-dark hover:bg-accent text-white text-[13px] font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed border border-accent-border outline-none"
           >
             {loading ? t("common.loading") : t("settings.gitSetupConfirm")}
           </button>

@@ -61,13 +61,13 @@ export function CloseActionDialog({ open, onCancel, onClose, onHide }: Props) {
         <div className="flex justify-end gap-2">
           <button
             onClick={handleClose}
-            className="px-3 py-1.5 rounded-[4px] text-[13px] font-medium text-tertiary hover:text-secondary hover:bg-surface-hover transition-colors outline-none"
+            className="px-3 py-1.5 rounded-lg text-[13px] font-medium text-tertiary hover:text-secondary hover:bg-surface-hover transition-colors outline-none"
           >
             {t("closeAction.close")}
           </button>
           <button
             onClick={handleHide}
-            className="px-3 py-1.5 rounded-[4px] bg-accent-dark hover:bg-accent text-white text-[13px] font-medium transition-colors border border-accent-border outline-none"
+            className="px-3 py-1.5 rounded-lg bg-accent-dark hover:bg-accent text-white text-[13px] font-medium transition-colors border border-accent-border outline-none"
           >
             {t("closeAction.hide")}
           </button>

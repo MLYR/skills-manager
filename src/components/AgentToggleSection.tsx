@@ -106,7 +106,7 @@ function AgentToggle({
       onClick={() => onToggle(item.key, !item.enabled)}
       disabled={disabled}
       className={cn(
-        "flex w-full items-center gap-2 rounded-[6px] border px-2 py-1.5 text-left text-[12px] transition-colors",
+        "flex w-full items-center gap-2 rounded-md border px-2 py-1.5 text-left text-[12px] transition-colors",
         item.enabled ? "border-border bg-surface" : "border-border-subtle bg-bg-secondary",
         !disabled && "hover:bg-surface-hover",
         disabled && "opacity-55"
@@ -125,7 +125,7 @@ function AgentToggle({
       <AgentIcon
         agentKey={item.key}
         displayName={item.displayName}
-        className="h-5 w-5 rounded-[5px]"
+        className="h-5 w-5 rounded-[4px]"
       />
       <span className="min-w-0 flex-1 truncate text-[12.5px] font-medium text-secondary">
         {item.displayName}

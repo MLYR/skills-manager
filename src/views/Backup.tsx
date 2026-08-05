@@ -24,6 +24,7 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 import { cn } from "../utils";
+import { ToggleSwitch } from "../components/ToggleSwitch";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 import { GitRecoveryDialog } from "../components/GitRecoveryDialog";
 import { GitSetupDialog } from "../components/GitSetupDialog";
@@ -769,7 +770,7 @@ export function Backup() {
           type="button"
           onClick={() => refreshGitStatus(true)}
           disabled={!!loading}
-          className="inline-flex h-8 items-center gap-1.5 rounded-[4px] border border-border bg-surface px-2.5 text-[13px] font-medium text-tertiary transition-colors hover:bg-surface-hover disabled:opacity-50"
+          className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-border bg-surface px-2.5 text-[13px] font-medium text-tertiary transition-colors hover:bg-surface-hover disabled:opacity-50"
         >
           <RefreshCw className="h-3.5 w-3.5" />
           {t("settings.refresh")}
@@ -781,7 +782,7 @@ export function Backup() {
           <section className={cn("app-panel border p-4", statusMeta.className)}>
             <div className="flex flex-wrap items-start justify-between gap-4">
               <div className="flex min-w-0 items-start gap-3">
-                <div className="mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-[6px] border border-border-subtle bg-surface">
+                <div className="mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-md border border-border-subtle bg-surface">
                   <StatusIcon className={cn("h-5 w-5", statusMeta.iconClassName)} />
                 </div>
                 <div className="min-w-0">
@@ -810,7 +811,7 @@ export function Backup() {
                             }}
                             autoFocus
                             maxLength={64}
-                            className="h-6 min-w-0 flex-1 rounded-[4px] border border-border-subtle bg-background px-1.5 text-[12px] text-secondary outline-none focus:border-border"
+                            className="h-6 min-w-0 flex-1 rounded-lg border border-border-subtle bg-background px-1.5 text-[12px] text-secondary outline-none focus:border-border"
                           />
                           <button
                             type="button"
@@ -848,7 +849,7 @@ export function Backup() {
                     type="button"
                     onClick={() => setReconnectMode(true)}
                     disabled={!!loading}
-                    className="inline-flex h-8 items-center gap-1.5 rounded-[4px] border border-amber-500/40 bg-amber-500/10 px-3 text-[13px] font-medium text-amber-700 transition-colors hover:bg-amber-500/15 disabled:opacity-50 dark:text-amber-300"
+                    className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 text-[13px] font-medium text-amber-700 transition-colors hover:bg-amber-500/15 disabled:opacity-50 dark:text-amber-300"
                   >
                     <Github className="h-3.5 w-3.5" />
                     {t("backup.github.reconnect")}
@@ -862,7 +863,7 @@ export function Backup() {
                       setRecoveryOpen(true);
                     }}
                     disabled={!!loading}
-                    className="inline-flex h-8 items-center gap-1.5 rounded-[4px] border border-red-500/40 bg-red-500/10 px-3 text-[13px] font-medium text-red-600 transition-colors hover:bg-red-500/15 disabled:opacity-50 dark:text-red-300"
+                    className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-red-500/40 bg-red-500/10 px-3 text-[13px] font-medium text-red-600 transition-colors hover:bg-red-500/15 disabled:opacity-50 dark:text-red-300"
                   >
                     <Wrench className="h-3.5 w-3.5" />
                     {t("settings.gitRecoveryTitle")}
@@ -872,7 +873,7 @@ export function Backup() {
                     type="button"
                     onClick={() => setSetupOpen(true)}
                     disabled={!!loading || !remoteConfig}
-                    className="inline-flex h-8 items-center gap-1.5 rounded-[4px] border border-accent-border bg-accent-dark px-3 text-[13px] font-medium text-white transition-colors hover:bg-accent disabled:opacity-50"
+                    className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-accent-border bg-accent-dark px-3 text-[13px] font-medium text-white transition-colors hover:bg-accent disabled:opacity-50"
                   >
                     {loading === "start" ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Cloud className="h-3.5 w-3.5" />}
                     {t("settings.gitStartBackup")}
@@ -882,7 +883,7 @@ export function Backup() {
                     type="button"
                     onClick={handleBackupNow}
                     disabled={!!loading || !canBackupNow}
-                    className="inline-flex h-8 items-center gap-1.5 rounded-[4px] border border-accent-border bg-accent-dark px-3 text-[13px] font-medium text-white transition-colors hover:bg-accent disabled:opacity-50"
+                    className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-accent-border bg-accent-dark px-3 text-[13px] font-medium text-white transition-colors hover:bg-accent disabled:opacity-50"
                   >
                     {loading === "sync" ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Upload className="h-3.5 w-3.5" />}
                     {backupError
@@ -924,7 +925,7 @@ export function Backup() {
                   return (
                     <li
                       key={conflict.skill_id}
-                      className="flex flex-wrap items-center justify-between gap-2 rounded-[6px] border border-border-subtle bg-bg-secondary px-3 py-2"
+                      className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-border-subtle bg-bg-secondary px-3 py-2"
                     >
                       <div className="min-w-0">
                         <div className="truncate text-[13px] font-medium text-primary">
@@ -943,7 +944,7 @@ export function Backup() {
                               type="button"
                               onClick={() => handleResolveConflict(conflict.skill_id, "keep_local")}
                               disabled={!!resolvingConflict || !!loading}
-                              className="rounded-[4px] border border-border-subtle px-2.5 py-1 text-[12px] font-medium text-secondary transition-colors hover:bg-surface-hover disabled:opacity-50"
+                              className="rounded-lg border border-border-subtle px-2.5 py-1 text-[12px] font-medium text-secondary transition-colors hover:bg-surface-hover disabled:opacity-50"
                             >
                               {t("backup.conflicts.keepLocal")}
                             </button>
@@ -951,7 +952,7 @@ export function Backup() {
                               type="button"
                               onClick={() => handleResolveConflict(conflict.skill_id, "use_remote")}
                               disabled={!!resolvingConflict || !!loading}
-                              className="rounded-[4px] border border-border-subtle px-2.5 py-1 text-[12px] font-medium text-secondary transition-colors hover:bg-surface-hover disabled:opacity-50"
+                              className="rounded-lg border border-border-subtle px-2.5 py-1 text-[12px] font-medium text-secondary transition-colors hover:bg-surface-hover disabled:opacity-50"
                             >
                               {t("backup.conflicts.useRemote")}
                             </button>
@@ -959,7 +960,7 @@ export function Backup() {
                               type="button"
                               onClick={() => handleResolveConflict(conflict.skill_id, "keep_both")}
                               disabled={!!resolvingConflict || !!loading}
-                              className="rounded-[4px] border border-border-subtle px-2.5 py-1 text-[12px] font-medium text-secondary transition-colors hover:bg-surface-hover disabled:opacity-50"
+                              className="rounded-lg border border-border-subtle px-2.5 py-1 text-[12px] font-medium text-secondary transition-colors hover:bg-surface-hover disabled:opacity-50"
                             >
                               {t("backup.conflicts.keepBoth")}
                             </button>
@@ -985,7 +986,7 @@ export function Backup() {
 
               {deviceInfo ? (
                 <div className="space-y-3">
-                  <div className="flex flex-col items-center gap-2 rounded-[6px] border border-border-subtle bg-bg-secondary px-4 py-4">
+                  <div className="flex flex-col items-center gap-2 rounded-md border border-border-subtle bg-bg-secondary px-4 py-4">
                     <div className="font-mono text-[26px] font-bold tracking-[0.25em] text-primary">
                       {deviceInfo.user_code}
                     </div>
@@ -1012,7 +1013,7 @@ export function Backup() {
                     <button
                       type="button"
                       onClick={cancelDeviceFlow}
-                      className="rounded-[4px] px-2.5 py-1 text-[12px] font-medium text-tertiary transition-colors hover:bg-surface-hover hover:text-secondary"
+                      className="rounded-lg px-2.5 py-1 text-[12px] font-medium text-tertiary transition-colors hover:bg-surface-hover hover:text-secondary"
                     >
                       {t("common.cancel")}
                     </button>
@@ -1025,7 +1026,7 @@ export function Backup() {
                       type="button"
                       onClick={handleDeviceFlow}
                       disabled={!!loading}
-                      className="inline-flex h-8 items-center gap-1.5 rounded-[4px] border border-accent-border bg-accent-dark px-3 text-[13px] font-medium text-white transition-colors hover:bg-accent disabled:cursor-not-allowed disabled:opacity-50"
+                      className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-accent-border bg-accent-dark px-3 text-[13px] font-medium text-white transition-colors hover:bg-accent disabled:cursor-not-allowed disabled:opacity-50"
                     >
                       {loading === "github" ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Github className="h-3.5 w-3.5" />}
                       {loading === "github" ? t("backup.github.connecting") : t("backup.github.deviceSignIn")}
@@ -1036,7 +1037,7 @@ export function Backup() {
                       onChange={(event) => setGithubRepoName(event.target.value)}
                       disabled={loading === "github"}
                       title={t("backup.github.repoLabel")}
-                      className="h-8 w-52 rounded-[4px] border border-border-subtle bg-background px-2.5 font-mono text-[13px] text-secondary outline-none transition-colors focus:border-border disabled:opacity-50"
+                      className="h-8 w-52 rounded-lg border border-border-subtle bg-background px-2.5 font-mono text-[13px] text-secondary outline-none transition-colors focus:border-border disabled:opacity-50"
                       autoCapitalize="none"
                       autoCorrect="off"
                       spellCheck={false}
@@ -1055,7 +1056,7 @@ export function Backup() {
                           }}
                           placeholder={t("backup.github.tokenPlaceholder")}
                           disabled={loading === "github"}
-                          className="h-8 min-w-0 flex-1 rounded-[4px] border border-border-subtle bg-background px-2.5 font-mono text-[13px] text-secondary outline-none transition-colors focus:border-border disabled:opacity-50"
+                          className="h-8 min-w-0 flex-1 rounded-lg border border-border-subtle bg-background px-2.5 font-mono text-[13px] text-secondary outline-none transition-colors focus:border-border disabled:opacity-50"
                           autoCapitalize="none"
                           autoCorrect="off"
                           spellCheck={false}
@@ -1064,7 +1065,7 @@ export function Backup() {
                           type="button"
                           onClick={handleGithubConnect}
                           disabled={!!loading || !githubToken.trim()}
-                          className="inline-flex h-8 items-center gap-1.5 rounded-[4px] border border-border bg-surface-hover px-2.5 text-[13px] font-medium text-tertiary transition-colors hover:bg-surface-active disabled:cursor-not-allowed disabled:opacity-50"
+                          className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-border bg-surface-hover px-2.5 text-[13px] font-medium text-tertiary transition-colors hover:bg-surface-active disabled:cursor-not-allowed disabled:opacity-50"
                         >
                           {t("backup.github.connect")}
                         </button>
@@ -1110,7 +1111,7 @@ export function Backup() {
                 value={remoteInput}
                 onChange={(event) => setRemoteInput(event.target.value)}
                 placeholder={t("settings.gitRemoteUrlPlaceholder")}
-                className="h-8 min-w-0 flex-1 rounded-[4px] border border-border-subtle bg-background px-2.5 font-mono text-[13px] text-secondary outline-none transition-colors focus:border-border"
+                className="h-8 min-w-0 flex-1 rounded-lg border border-border-subtle bg-background px-2.5 font-mono text-[13px] text-secondary outline-none transition-colors focus:border-border"
                 autoCapitalize="none"
                 autoCorrect="off"
                 spellCheck={false}
@@ -1119,7 +1120,7 @@ export function Backup() {
                 type="button"
                 onClick={handleSaveRemote}
                 disabled={loading === "save"}
-                className="inline-flex h-8 items-center gap-1.5 rounded-[4px] border border-border bg-surface-hover px-2.5 text-[13px] font-medium text-tertiary transition-colors hover:bg-surface-active disabled:opacity-50"
+                className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-border bg-surface-hover px-2.5 text-[13px] font-medium text-tertiary transition-colors hover:bg-surface-active disabled:opacity-50"
               >
                 {loading === "save" ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Save className="h-3.5 w-3.5" />}
                 {t("common.save")}
@@ -1137,7 +1138,7 @@ export function Backup() {
                 type="button"
                 onClick={refreshVersions}
                 disabled={versionsLoading || !gitStatus?.is_repo}
-                className="inline-flex h-7 items-center gap-1.5 rounded-[4px] px-2 text-[13px] text-muted transition-colors hover:bg-surface-hover hover:text-secondary disabled:opacity-50"
+                className="inline-flex h-7 items-center gap-1.5 rounded-lg px-2 text-[13px] text-muted transition-colors hover:bg-surface-hover hover:text-secondary disabled:opacity-50"
               >
                 <RefreshCw className={cn("h-3 w-3", versionsLoading && "animate-spin")} />
                 {t("settings.refresh")}
@@ -1147,7 +1148,7 @@ export function Backup() {
             {versionsLoading ? (
               <div className="py-6 text-center text-[13px] text-muted">{t("mySkills.gitVersionLoading")}</div>
             ) : versions.length === 0 ? (
-              <div className="rounded-[6px] border border-dashed border-border-subtle py-6 text-center text-[13px] text-muted">
+              <div className="rounded-md border border-dashed border-border-subtle py-6 text-center text-[13px] text-muted">
                 {t("backup.history.empty")}
               </div>
             ) : (
@@ -1155,7 +1156,7 @@ export function Backup() {
                 {versions.map((version) => (
                   <div
                     key={version.tag}
-                    className="flex items-center justify-between gap-3 rounded-[6px] border border-border-subtle bg-bg-secondary px-3 py-2"
+                    className="flex items-center justify-between gap-3 rounded-md border border-border-subtle bg-bg-secondary px-3 py-2"
                   >
                     <div className="min-w-0">
                       <div className="truncate text-[13px] font-semibold text-secondary">
@@ -1171,7 +1172,7 @@ export function Backup() {
                       type="button"
                       onClick={() => setRestoreVersionTag(version.tag)}
                       disabled={!!restoringVersionTag}
-                      className="shrink-0 rounded-[4px] border border-border-subtle px-2 py-1 text-[12px] font-medium text-secondary transition-colors hover:bg-surface-hover disabled:opacity-50"
+                      className="shrink-0 rounded-lg border border-border-subtle px-2 py-1 text-[12px] font-medium text-secondary transition-colors hover:bg-surface-hover disabled:opacity-50"
                     >
                       {restoringVersionTag === version.tag
                         ? t("mySkills.gitVersionRestoring")
@@ -1205,7 +1206,7 @@ export function Backup() {
               ))}
             </div>
             {sizeReport && (sizeReport.oversized.length > 0 || sizeReport.total_bytes > sizeReport.repo_warn_bytes) ? (
-              <div className="mt-3 space-y-1 rounded-[6px] border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-[12px] leading-5 text-amber-700 dark:text-amber-300">
+              <div className="mt-3 space-y-1 rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-[12px] leading-5 text-amber-700 dark:text-amber-300">
                 {sizeReport.total_bytes > sizeReport.repo_warn_bytes && (
                   <div>{t("backup.scope.repoTooLarge", { size: formatBytes(sizeReport.total_bytes) })}</div>
                 )}
@@ -1218,7 +1219,7 @@ export function Backup() {
                 ))}
               </div>
             ) : (
-              <div className="mt-3 rounded-[6px] border border-border-subtle bg-bg-secondary px-3 py-2 text-[12px] leading-5 text-muted">
+              <div className="mt-3 rounded-md border border-border-subtle bg-bg-secondary px-3 py-2 text-[12px] leading-5 text-muted">
                 {t("backup.scope.sizeHint")}
               </div>
             )}
@@ -1230,25 +1231,13 @@ export function Backup() {
                 <h2 className="text-[14px] font-semibold text-secondary">{t("backup.auto.title")}</h2>
                 <p className="mt-1 text-[12px] leading-5 text-muted">{t("backup.auto.desc")}</p>
               </div>
-              <button
-                type="button"
-                role="switch"
-                aria-checked={autoBackupEnabled}
-                onClick={handleToggleAutoBackup}
-                disabled={autoBackupSaving}
-                className={cn(
-                  "relative mt-0.5 inline-flex h-4 w-7 shrink-0 items-center rounded-full outline-none transition-colors focus-visible:ring-2 focus-visible:ring-accent",
-                  autoBackupEnabled ? "bg-emerald-500" : "bg-zinc-300 dark:bg-zinc-600",
-                  autoBackupSaving ? "cursor-wait opacity-60" : "cursor-pointer"
-                )}
-              >
-                <span
-                  className={cn(
-                    "inline-flex h-3 w-3 items-center justify-center rounded-full bg-white shadow transition-transform",
-                    autoBackupEnabled ? "translate-x-3.5" : "translate-x-0.5"
-                  )}
-                />
-              </button>
+              <ToggleSwitch
+                className="mt-0.5"
+                checked={autoBackupEnabled}
+                loading={autoBackupSaving}
+                onChange={handleToggleAutoBackup}
+                title={t("backup.auto.title")}
+              />
             </div>
           </section>
 
@@ -1263,7 +1252,7 @@ export function Backup() {
                 type="button"
                 onClick={() => setDisconnectConfirmOpen(true)}
                 disabled={loading === "disconnect" || (!remoteConfig && !gitStatus?.remote_url)}
-                className="inline-flex h-8 items-center gap-1.5 rounded-[4px] border border-border bg-surface-hover px-2.5 text-[13px] font-medium text-tertiary transition-colors hover:bg-surface-active disabled:opacity-50"
+                className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-border bg-surface-hover px-2.5 text-[13px] font-medium text-tertiary transition-colors hover:bg-surface-active disabled:opacity-50"
               >
                 {loading === "disconnect" ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Unlink className="h-3.5 w-3.5" />}
                 {t("settings.gitDisconnect")}
@@ -1273,7 +1262,7 @@ export function Backup() {
                   type="button"
                   onClick={() => setRevokeConfirmOpen(true)}
                   disabled={loading === "disconnect"}
-                  className="inline-flex h-8 items-center gap-1.5 rounded-[4px] border border-border bg-surface-hover px-2.5 text-[13px] font-medium text-tertiary transition-colors hover:bg-surface-active disabled:opacity-50"
+                  className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-border bg-surface-hover px-2.5 text-[13px] font-medium text-tertiary transition-colors hover:bg-surface-active disabled:opacity-50"
                 >
                   <ExternalLink className="h-3.5 w-3.5" />
                   {t("backup.disconnect.revoke")}
@@ -1290,7 +1279,7 @@ export function Backup() {
               </p>
             )}
             {githubRepoWebUrl && (
-              <div className="mt-3 rounded-[6px] border border-red-500/40 bg-red-500/10 px-3 py-2.5">
+              <div className="mt-3 rounded-md border border-red-500/40 bg-red-500/10 px-3 py-2.5">
                 <div className="text-[13px] font-medium text-red-700 dark:text-red-300">
                   {t("backup.disconnect.deleteRemote")}
                 </div>
@@ -1300,7 +1289,7 @@ export function Backup() {
                 <button
                   type="button"
                   onClick={() => setDeleteRemoteConfirmOpen(true)}
-                  className="mt-2 inline-flex h-7 items-center gap-1.5 rounded-[4px] border border-red-500/50 px-2.5 text-[12px] font-medium text-red-700 transition-colors hover:bg-red-500/15 dark:text-red-300"
+                  className="mt-2 inline-flex h-7 items-center gap-1.5 rounded-lg border border-red-500/50 px-2.5 text-[12px] font-medium text-red-700 transition-colors hover:bg-red-500/15 dark:text-red-300"
                 >
                   <ExternalLink className="h-3 w-3" />
                   {t("backup.disconnect.deleteRemoteAction")}
@@ -1312,11 +1301,11 @@ export function Backup() {
           <section className="app-panel p-4">
             <h2 className="text-[14px] font-semibold text-secondary">{t("backup.summary.title")}</h2>
             <div className="mt-3 grid grid-cols-2 gap-2 text-[12px]">
-              <div className="rounded-[6px] border border-border-subtle bg-bg-secondary px-3 py-2">
+              <div className="rounded-md border border-border-subtle bg-bg-secondary px-3 py-2">
                 <div className="text-faint">{t("backup.summary.skills")}</div>
                 <div className="mt-1 text-[18px] font-semibold text-primary">{managedSkills.length}</div>
               </div>
-              <div className="rounded-[6px] border border-border-subtle bg-bg-secondary px-3 py-2">
+              <div className="rounded-md border border-border-subtle bg-bg-secondary px-3 py-2">
                 <div className="text-faint">{t("backup.summary.snapshots")}</div>
                 <div className="mt-1 text-[18px] font-semibold text-primary">{versions.length}</div>
               </div>

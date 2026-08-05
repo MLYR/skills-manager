@@ -5,7 +5,9 @@ use chrono::{DateTime, Utc};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Runtime};
 
-use crate::commands::skills::{check_skill_update_internal, update_git_skill_internal};
+use crate::commands::skills::{
+    check_skill_update_internal_with_remote, prefetch_skill_remote, update_git_skill_internal,
+};
 use crate::core::repo_lock::RepoLock;
 use crate::core::skill_store::SkillStore;
 
@@ -164,6 +166,11 @@ fn run_round_blocking(store: &SkillStore) -> Result<(), String> {
         std::thread::sleep(FOREGROUND_YIELD);
         checked += 1;
 
+        // Resolve the remote before taking the lock: the lock must never be
+        // held across a network round-trip, or a slow remote fails every
+        // concurrent user-initiated operation with a 20s "busy" (#315).
+        let prefetched = prefetch_skill_remote(store, &skill_id, true, proxy.as_deref());
+
         // The check holds the repo lock; it must be released before applying,
         // because update_git_skill_internal acquires the lock itself.
         let status = {
@@ -175,7 +182,7 @@ fn run_round_blocking(store: &SkillStore) -> Result<(), String> {
                     continue;
                 }
             };
-            match check_skill_update_internal(store, &skill_id, true, proxy.as_deref()) {
+            match check_skill_update_internal_with_remote(store, &skill_id, true, prefetched) {
                 Ok(dto) => dto.update_status,
                 Err(err) => {
                     failed += 1;

@@ -427,16 +427,13 @@ pub fn ensure_default_startup_scenario(store: &SkillStore) -> Result<(), AppErro
         scenarios.push(default_scenario);
     }
 
+    // Startup restores whatever preset was last active; there is no separate
+    // "default startup preset" setting to override it.
     let current_active = store.get_active_scenario_id().map_err(AppError::db)?;
-    let preferred_default = store.get_setting("default_scenario").ok().flatten();
 
-    let desired_active = preferred_default
+    let desired_active = current_active
+        .clone()
         .filter(|id| scenarios.iter().any(|scenario| scenario.id == *id))
-        .or_else(|| {
-            current_active
-                .clone()
-                .filter(|id| scenarios.iter().any(|scenario| scenario.id == *id))
-        })
         .unwrap_or_else(|| scenarios[0].id.clone());
 
     if current_active.as_deref() != Some(desired_active.as_str()) {
@@ -476,13 +473,8 @@ pub fn ensure_cli_scenario_state(store: &SkillStore) -> Result<(), AppError> {
         return Ok(());
     }
 
-    let preferred_default = store.get_setting("default_scenario").ok().flatten();
-    let desired_active = preferred_default
-        .filter(|id| scenarios.iter().any(|scenario| scenario.id == *id))
-        .unwrap_or_else(|| scenarios[0].id.clone());
-
     store
-        .set_active_scenario(&desired_active)
+        .set_active_scenario(&scenarios[0].id)
         .map_err(AppError::db)
 }
 
