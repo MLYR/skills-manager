@@ -111,24 +111,27 @@ pub fn parse_persisted_config_with_key(
     raw: &str,
 ) -> Result<(AiConfigInput, Option<String>), AiCommandError> {
     let mut value: Value = serde_json::from_str(raw).map_err(|_| invalid_config())?;
-    let api_key = match value.get(API_KEY_FIELD) {
-        None | Some(Value::Null) => None,
-        Some(Value::String(api_key)) => normalize_api_key(api_key)?,
-        Some(_) => return Err(invalid_config()),
-    };
+    let api_key_value = value.get(API_KEY_FIELD).cloned();
     let object = value.as_object_mut().ok_or_else(invalid_config)?;
     object.remove(API_KEY_FIELD);
     let config: AiConfigInput =
         serde_json::from_value(Value::Object(object.clone())).map_err(|_| invalid_config())?;
+    if matches!(config.provider.as_str(), "openrouter" | "custom") {
+        // 已移除的服务商不能继续携带旧 Key 进入新服务商；仅在内存中降级为
+        // 未配置默认项，等待用户显式选择并保存，不会在读取时静默覆盖 settings。
+        return Ok((default_config(), None));
+    }
+    let api_key = match api_key_value {
+        None | Some(Value::Null) => None,
+        Some(Value::String(api_key)) => normalize_api_key(&api_key)?,
+        Some(_) => return Err(invalid_config()),
+    };
     validate_config(&config)?;
     Ok((config, api_key))
 }
 
 pub fn validate_config(config: &AiConfigInput) -> Result<(), AiCommandError> {
-    if !matches!(
-        config.provider.as_str(),
-        "openai" | "deepseek" | "openrouter" | "ollama" | "custom"
-    ) {
+    if !matches!(config.provider.as_str(), "openai" | "deepseek" | "ollama") {
         return Err(invalid_config());
     }
     if config.model.trim().is_empty()
@@ -212,20 +215,12 @@ pub fn provider_presets() -> Vec<AiProviderPresetDto> {
             true,
         ),
         preset(
-            "openrouter",
-            "OpenRouter",
-            "https://openrouter.ai/api/v1/",
-            None,
-            true,
-        ),
-        preset(
             "ollama",
             "Ollama",
             "http://127.0.0.1:11434/v1/",
             None,
             false,
         ),
-        preset("custom", "Custom", "", None, true),
     ]
 }
 
@@ -258,7 +253,7 @@ pub fn retention_days_for_cleanup(store: &SkillStore) -> Result<u16, AiCommandEr
 
 fn default_config() -> AiConfigInput {
     AiConfigInput {
-        provider: "custom".into(),
+        provider: "openai".into(),
         base_url: String::new(),
         model: String::new(),
         output_language: "auto".into(),
@@ -340,7 +335,7 @@ mod tests {
     fn absent_setting_alone_uses_defaults() {
         let (_directory, store) = store();
         let config = load_config(&store).unwrap();
-        assert_eq!(config.provider, "custom");
+        assert_eq!(config.provider, "openai");
         assert_eq!(config.timeout_seconds, 60);
         assert_eq!(config.log_retention_days, 30);
     }
@@ -423,13 +418,25 @@ mod tests {
     }
 
     #[test]
+    fn removed_provider_configs_drop_their_legacy_key_until_user_reconfigures() {
+        for provider in ["openrouter", "custom"] {
+            let mut value = serde_json::to_value(valid_config()).unwrap();
+            value["provider"] = serde_json::json!(provider);
+            value[API_KEY_FIELD] = serde_json::json!("legacy-key-must-not-be-reused");
+
+            let (config, api_key) = parse_persisted_config_with_key(&value.to_string()).unwrap();
+            assert_eq!(config, default_config());
+            assert_eq!(api_key, None);
+        }
+    }
+
+    #[test]
     fn provider_presets_match_frozen_urls_and_key_policy() {
         let presets = provider_presets();
         assert_eq!(presets[0].base_url, "https://api.openai.com/v1/");
         assert_eq!(presets[1].base_url, "https://api.deepseek.com/v1/");
-        assert_eq!(presets[2].base_url, "https://openrouter.ai/api/v1/");
-        assert_eq!(presets[3].base_url, "http://127.0.0.1:11434/v1/");
-        assert!(!presets[3].api_key_required);
-        assert!(presets[4].api_key_required);
+        assert_eq!(presets[2].base_url, "http://127.0.0.1:11434/v1/");
+        assert!(!presets[2].api_key_required);
+        assert_eq!(presets.len(), 3);
     }
 }

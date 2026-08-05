@@ -74,14 +74,13 @@ export function AiAnalysisManager() {
         return { targets: [], counts };
       }
       const summaries = await listAiAnalysisSummaries({ targets });
-      // Only explicitly unparsed targets are eligible. Unconfigured, failed,
-      // stale, queued, and already succeeded targets must never be included.
+      // 一键解析补齐没有有效解读的目标：失败项需要能经预览确认后重试，
+      // 但成功、过期和活动任务仍不能再次产生请求。
       const next = summaries
-        .filter((summary) => summary.status === "unparsed")
+        .filter((summary) => summary.status === "unparsed" || summary.status === "failed")
         .map((summary) => summary.target);
       const counts = {
-        // A stale result still exists and is intentionally excluded from the
-        // missing-only action until the user explicitly requests re-analysis.
+        // 过期结果仍是已有解读，不会被“一键解析”重复请求。
         parsed: summaries.filter((summary) => summary.status === "succeeded" || summary.status === "stale").length,
         unparsed: next.length,
       };
@@ -254,10 +253,13 @@ export function AiAnalysisManager() {
   const requestLog =
     jobLogs.find((log) => log.event_kind === "request_started" || log.event_kind === "correction_requested") ??
     null;
+  // JSON/Schema 失败会先记录真实响应、再记录终态错误；优先展示前者，
+  // 否则按时间排序时通用错误会把实际服务商响应遮住。
   const responseLog =
-    jobLogs.find((log) =>
-      ["response_received", "request_failed", "retry_scheduled", "cancelled"].includes(log.event_kind),
-    ) ?? null;
+    jobLogs.find((log) => log.event_kind === "response_received") ??
+    jobLogs.find((log) => ["request_failed", "retry_scheduled", "cancelled"].includes(log.event_kind)) ??
+    null;
+  const responseError = jobLogs.find((log) => Boolean(log.error_message)) ?? null;
 
   return (
     <div className="space-y-6 p-6">
@@ -489,7 +491,17 @@ export function AiAnalysisManager() {
               />
               <LogPane
                 title={t("ai.logs.response")}
-                content={responseLog ? [responseLog.raw_response, responseLog.error_message].filter(Boolean).join("\n\n") : null}
+                content={
+                  responseLog
+                    ? [
+                        responseLog.raw_response,
+                        responseLog.error_message,
+                        responseError?.id === responseLog.id ? null : responseError?.error_message,
+                      ]
+                        .filter(Boolean)
+                        .join("\n\n")
+                    : null
+                }
               />
             </div>
             <div className="flex flex-wrap gap-2 text-[11px] text-faint">

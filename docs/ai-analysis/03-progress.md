@@ -528,3 +528,31 @@
 处理决策：获取到非空模型列表后改用真正的 `select` 下拉框，完整展示所有去重后的模型；获取前、空列表或刷新失败时继续使用手动输入框，保留配置回退能力；当前已保存但不在远端列表中的模型作为额外选项保留。
 
 验证结果：`rtk npx tsc -b --pretty false`、`rtk npm run lint`、三语 `settings.ai` 键集合一致（92个）、`rtk git diff --check`均通过。未启动/构建前端；启动、构建、打包命令仍分别为 `npm run dev`、`npm run build`、`npm run tauri:build`。验收结论：通过。
+
+## 25. DeepSeek JSON 输出兼容与一键解析失败项修复（2026-08-05，已完成）
+
+问题证据：用户配置 `deepseek / deepseek-v4-flash / https://api.deepseek.com/v1/` 后，两个批次共 14 个任务均在一次正常请求和一次纠正请求后以 `invalid_json` 失败。当前分析请求未设置 JSON 输出模式，且响应提取仅接受纯 JSON；失败路径未保存实际响应。AI 管理页“一键解析”只将 `unparsed` 视为候选，`failed` 被计入跳过，因此全失败时会错误提示“没有未解析的 Skill；已解析 0 个”。
+
+处理决策：对 OpenAI、DeepSeek、OpenRouter 分别显式开启 OpenAI Compatible `response_format: {"type":"json_object"}`；仅兼容全文唯一的 Markdown JSON 围栏，随后仍执行严格 Schema v1；JSON/Schema 失败时持久化统一脱敏且最多 64KiB 的实际 HTTP 响应。`missing_only` 改为“没有有效 AI 解读”，允许失败项经预览确认后重新入队，仍排除成功、过期和活动任务，避免重复请求已有结果。
+
+当前负责人：主会话。范围：`src-tauri/src/core/ai/provider.rs`、`src-tauri/src/core/ai/service.rs`、`src-tauri/src/core/ai/logs.rs`、`src-tauri/src/commands/ai.rs`、`src/views/AiAnalysisManager.tsx`、`01-overall-plan.md`、本进度记录。
+
+首次验收后的真实响应复核：`deepseek-v4-flash` 返回 `choices[0].message.content=""`、`reasoning_content` 非空、`finish_reason="length"`，且 2047 个 completion Token 都是 reasoning Token；这证明现有失败不是 Markdown 围栏，而是 DeepSeek 默认开启 thinking 后未在固定 2048 输出预算内生成最终内容。不能把 `reasoning_content` 当成正式结果或展示给用户。根据 DeepSeek 当前 OpenAI Compatible 文档，分析请求已追加 `thinking: {"type":"disabled"}`；空 `content` 会返回明确的“无最终 JSON”错误并保留脱敏响应日志。
+
+补充验收：新增基于实际响应信封的 `reasoning_content + content="" + finish_reason="length"` 定向测试，确保不会误把推理字段当作 Schema v1 结果；`rtk cargo test --manifest-path src-tauri/Cargo.toml deepseek -- --nocapture`：3 passed；完整 `rtk cargo test --manifest-path src-tauri/Cargo.toml`通过（496项）；`rtk cargo check --manifest-path src-tauri/Cargo.toml`、`rtk npx tsc -b --pretty false`、`rtk npm run lint`、相关 Rust `rustfmt --check`及`rtk git diff --check`均通过。验收结论：主会话自审通过。
+
+再次复核：DeepSeek 已返回非空、语法正确的 JSON，但其中 `one_line` 超过 Schema v1 的 60 字符上限，`example_prompts` 共有 18 项而上限为 10 项；当前系统提示词未重复这些持久化硬限制，导致模型无法稳定满足校验。处理结果：提示词已补齐既有 Schema v1 限制（不改变 Schema 或结果语义），后端终态错误会说明静态字段/数量/长度违规原因，便于日志排查。
+
+最终补充验收：超长 `one_line` 与超过 10 项 `example_prompts` 的定向断言通过；`rtk cargo test --manifest-path src-tauri/Cargo.toml core::ai:: -- --nocapture`：73 passed；完整 `rtk cargo test --manifest-path src-tauri/Cargo.toml`通过（496项）；`rtk cargo check --manifest-path src-tauri/Cargo.toml`、`rtk npx tsc -b --pretty false`、`rtk npm run lint`、相关 Rust `rustfmt --check`及`rtk git diff --check`均通过。验收结论：主会话自审通过。
+
+## 26. AI 服务商收敛与 Ollama JSON 模式统一（2026-08-05，已完成）
+
+用户要求设置页仅保留 OpenAI、DeepSeek、Ollama，并确保 Ollama 的解析格式与前两者一致。当前 Ollama OpenAI Compatible `/v1/chat/completions` 支持 `response_format` JSON 模式；处理移除了 OpenRouter/custom 的前后端枚举、预设和测试分支，三家服务商统一请求 JSON 输出，DeepSeek 继续额外关闭 thinking。已存在的 OpenRouter/custom 本地配置安全降级为未配置的 OpenAI 默认项且不读取旧 Key，不能把旧凭据交给另一服务商。
+
+实现与验收：`AiProvider`、设置页选项、Rust配置校验和预设统一收敛为三项；Ollama 解析请求现在与 OpenAI/DeepSeek 一样携带 `response_format: {"type":"json_object"}`；legacy 配置测试证明旧 Key 仅留在未读取的历史 settings 中，运行时返回空 Key 并要求重新保存。`core::ai::config::tests`：9 passed；`core::ai::provider::tests`：10 passed；完整 `rtk cargo test --manifest-path src-tauri/Cargo.toml`通过（497项）；`rtk cargo check --manifest-path src-tauri/Cargo.toml`、`rtk npx tsc -b --pretty false`、`rtk npm run lint`、相关 Rust `rustfmt --check`及`rtk git diff --check`均通过。验收结论：主会话自审通过。
+
+## 27. 移除“原文未说明”占位解读（2026-08-05，已完成）
+
+用户反馈：AI 解读的“怎么使用”“需要准备什么”“不适用场景”和示例提示词出现重复“原文未说明”，这违背了产品目标——应让 AI 基于主文档整理可用说明。处理结果：提示词改为要求保守归纳，不允许输出该占位文本；无法形成有用条目时返回空数组。Schema 同步拒绝完全等于“原文未说明”的字段/数组项，避免低质量结果保存。历史结果若含该占位词仅标记为待更新，不自动发起请求或产生费用。
+
+验收：Schema 占位词拒绝测试 5 passed、提示词测试 2 passed、AI Commands 测试 14 passed；完整 `rtk cargo test --manifest-path src-tauri/Cargo.toml`通过（498项）；`rtk cargo check --manifest-path src-tauri/Cargo.toml`、`rtk npx tsc -b --pretty false`、`rtk npm run lint`、相关 Rust `rustfmt --check`及`rtk git diff --check`均通过。验收结论：主会话自审通过。

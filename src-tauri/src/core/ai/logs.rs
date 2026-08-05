@@ -11,6 +11,8 @@ use super::repository::AiRepository;
 use super::types::{AiCommandError, AiErrorCode, AiErrorKind, AiLogRecord};
 
 const MAX_ERROR_MESSAGE_CHARS: usize = 4_096;
+const MAX_RAW_RESPONSE_LOG_BYTES: usize = 65_536;
+const RAW_RESPONSE_TRUNCATION_MARKER: &str = "\n[TRUNCATED]";
 
 /// Repository code can inspect this record but cannot construct one; the
 /// private field makes this module the only gate from raw text to persistence.
@@ -46,7 +48,11 @@ pub(super) fn sanitized_record(
     sanitize_optional(&mut record.target_payload_json, current_api_key, false);
     sanitize_optional(&mut record.request_system_prompt, current_api_key, false);
     sanitize_optional(&mut record.request_user_prompt, current_api_key, false);
-    sanitize_optional(&mut record.raw_response, current_api_key, false);
+    if let Some(raw_response) = &mut record.raw_response {
+        // 诊断响应可能来自不受信任的服务商；先统一脱敏再按 UTF-8 边界限长，
+        // 避免排查日志意外保存认证信息或无限膨胀数据库。
+        *raw_response = sanitize_raw_response(raw_response, current_api_key);
+    }
     sanitize_optional(&mut record.error_message, current_api_key, true);
     SanitizedAiLogRecord(record)
 }
@@ -122,6 +128,26 @@ pub fn sanitize_error_message(value: &str, current_api_key: Option<&str>) -> Str
         .chars()
         .take(MAX_ERROR_MESSAGE_CHARS)
         .collect()
+}
+
+fn sanitize_raw_response(value: &str, current_api_key: Option<&str>) -> String {
+    let sanitized = sanitize_log_text(value, current_api_key);
+    if sanitized.len() <= MAX_RAW_RESPONSE_LOG_BYTES {
+        return sanitized;
+    }
+
+    let limit = MAX_RAW_RESPONSE_LOG_BYTES.saturating_sub(RAW_RESPONSE_TRUNCATION_MARKER.len());
+    let boundary = sanitized
+        .char_indices()
+        .take_while(|(index, character)| index.saturating_add(character.len_utf8()) <= limit)
+        .map(|(index, character)| index + character.len_utf8())
+        .last()
+        .unwrap_or(0);
+    format!(
+        "{}{}",
+        &sanitized[..boundary],
+        RAW_RESPONSE_TRUNCATION_MARKER
+    )
 }
 
 fn sanitize_optional(value: &mut Option<String>, current_api_key: Option<&str>, is_error: bool) {
@@ -383,5 +409,20 @@ proxy%2Dauthorization%3ABasic%20encoded-proxy-secret&set%2Dcookie=encoded-cookie
                 Ok(())
             })
             .unwrap();
+    }
+
+    #[test]
+    fn raw_response_is_redacted_and_limited_without_breaking_utf8() {
+        let api_key = "response-secret";
+        let raw = format!(
+            "Authorization: Bearer {api_key}\n{}",
+            "多".repeat(MAX_RAW_RESPONSE_LOG_BYTES)
+        );
+        let sanitized = sanitize_raw_response(&raw, Some(api_key));
+
+        assert!(!sanitized.contains(api_key));
+        assert!(sanitized.contains("Authorization: [REDACTED]"));
+        assert!(sanitized.ends_with(RAW_RESPONSE_TRUNCATION_MARKER));
+        assert!(sanitized.len() <= MAX_RAW_RESPONSE_LOG_BYTES);
     }
 }

@@ -28,9 +28,7 @@ import type {
 const AI_PROVIDERS: readonly AiProvider[] = [
   "openai",
   "deepseek",
-  "openrouter",
   "ollama",
-  "custom",
 ];
 const AI_OUTPUT_LANGUAGES: readonly AiOutputLanguage[] = ["auto", "zh", "zh-TW", "en"];
 interface AiConfigForm {

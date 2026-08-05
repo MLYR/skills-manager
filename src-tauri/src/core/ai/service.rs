@@ -12,7 +12,7 @@ use crate::core::skill_store::SkillStore;
 
 use super::config::{load_api_key, load_config, provider_requires_api_key};
 use super::document::{collect_document, CollectedDocument, DocumentOutcome};
-use super::logs::{sanitize_error_message, sanitized_record};
+use super::logs::{sanitize_error_message, sanitized_record, save_log};
 use super::preview::now_millis;
 use super::prompt::{build_analysis_prompt, AiAnalysisPrompt, PROMPT_VERSION};
 use super::provider::{send_analysis_completion, AnalysisAttempt};
@@ -166,6 +166,7 @@ async fn run_job(
                         latency_ms,
                     } => {
                         if status.is_success() {
+                            let (input, output, total) = extract_usage(&body);
                             // OpenAI-compatible chat completions wrap the model
                             // text in choices[0].message.content; validating the
                             // envelope itself always fails schema v1. Extract
@@ -175,7 +176,6 @@ async fn run_job(
                             {
                                 Ok(result) => {
                                     let now = now_millis();
-                                    let (input, output, total) = extract_usage(&body);
                                     let log = sanitized_record(
                                         response_received_log(
                                             job,
@@ -228,6 +228,23 @@ async fn run_job(
                                                 | AiErrorCode::SchemaValidation
                                         ) =>
                                 {
+                                    let now = now_millis();
+                                    persist_invalid_response_log(
+                                        store.clone(),
+                                        response_received_log(
+                                            job,
+                                            &claimed.batch,
+                                            &body,
+                                            status.as_u16(),
+                                            latency_ms,
+                                            input,
+                                            output,
+                                            total,
+                                            now,
+                                        ),
+                                        prepared.api_key.as_deref(),
+                                    )
+                                    .await?;
                                     // One correction request is allowed by the
                                     // confirmed cost ceiling; the counter is
                                     // pre-committed on the next loop iteration.
@@ -236,6 +253,22 @@ async fn run_job(
                                 }
                                 Err(schema_error) => {
                                     let now = now_millis();
+                                    persist_invalid_response_log(
+                                        store.clone(),
+                                        response_received_log(
+                                            job,
+                                            &claimed.batch,
+                                            &body,
+                                            status.as_u16(),
+                                            latency_ms,
+                                            input,
+                                            output,
+                                            total,
+                                            now,
+                                        ),
+                                        prepared.api_key.as_deref(),
+                                    )
+                                    .await?;
                                     fail_terminal(
                                         store.clone(),
                                         job,
@@ -506,6 +539,21 @@ async fn fail_retry(
     Ok(())
 }
 
+async fn persist_invalid_response_log(
+    store: Arc<SkillStore>,
+    log: AiLogRecord,
+    api_key: Option<&str>,
+) -> Result<(), AiCommandError> {
+    let api_key = api_key.map(str::to_string);
+    tokio::task::spawn_blocking(move || {
+        // JSON/Schema 失败时保留经过日志网关处理的实际响应，避免只能看到笼统错误。
+        save_log(&store, log, api_key.as_deref())
+    })
+    .await
+    .map_err(|_| internal_error("AI analysis response log task failed"))??;
+    Ok(())
+}
+
 fn fail_terminal_sync(
     store: &SkillStore,
     job: &AiJobRecord,
@@ -727,7 +775,17 @@ fn extract_analysis_payload(body: &[u8]) -> Result<Vec<u8>, AiCommandError> {
         .and_then(|message| message.get("content"))
         .and_then(|content| content.as_str())
     {
-        return Ok(content.as_bytes().to_vec());
+        if content.trim().is_empty() {
+            // reasoning_content 不是业务结果；DeepSeek 在输出被截断时可能只返回
+            // 它而没有 content，必须保留原响应并走既有一次纠正请求。
+            return Err(super::command_error(
+                AiErrorKind::Provider,
+                AiErrorCode::InvalidJson,
+                "The AI provider returned no final analysis JSON.",
+                false,
+            ));
+        }
+        return Ok(normalize_analysis_payload(content));
     }
 
     // Direct-schema responses (some local OpenAI-compatible servers) pass the
@@ -742,6 +800,27 @@ fn extract_analysis_payload(body: &[u8]) -> Result<Vec<u8>, AiCommandError> {
         "The AI provider response does not match analysis schema v1.",
         false,
     ))
+}
+
+fn normalize_analysis_payload(content: &str) -> Vec<u8> {
+    let trimmed = content.trim();
+    let Some((opening, remainder)) = trimmed.split_once('\n') else {
+        return content.as_bytes().to_vec();
+    };
+    let opening = opening.trim_end_matches('\r');
+    if opening != "```" && !opening.eq_ignore_ascii_case("```json") {
+        return content.as_bytes().to_vec();
+    }
+    let remainder = remainder.trim_end();
+    let Some(json) = remainder.strip_suffix("```") else {
+        return content.as_bytes().to_vec();
+    };
+    let json = json.trim();
+    if json.is_empty() {
+        return content.as_bytes().to_vec();
+    }
+    // 只接受全文唯一的围栏，避免从模型解释文字中猜测或截取 JSON。
+    json.as_bytes().to_vec()
 }
 
 /// Frozen backoff: first retry after 2s, second after 4s.
@@ -838,6 +917,93 @@ mod tests {
         // Direct-schema responses pass through unchanged.
         let direct = serde_json::to_vec(&inner).unwrap();
         assert_eq!(extract_analysis_payload(&direct).unwrap(), direct);
+    }
+
+    #[test]
+    fn deepseek_v4_flash_markdown_json_response_is_accepted() {
+        let inner = serde_json::json!({
+            "one_line": "用于生成动画的 Skill",
+            "what_it_does": "根据原文说明动画能力。",
+            "when_to_use": ["需要制作动画时"],
+            "how_to_use": ["提供动画需求"],
+            "example_prompts": ["帮我制作一个淡入动画"],
+            "requirements": [],
+            "not_for": [],
+            "warnings": []
+        });
+        // DeepSeek 当前 Chat Completions 形态仍使用 choices/message/content；
+        // 即使内容被完整 JSON 围栏包裹，也只能在去围栏后接受 Schema v1。
+        let envelope = serde_json::json!({
+            "id": "chatcmpl-deepseek-test",
+            "model": "deepseek-v4-flash",
+            "object": "chat.completion",
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": format!("```json\n{}\n```", inner)},
+                "finish_reason": "stop"
+            }]
+        });
+        let payload = extract_analysis_payload(&serde_json::to_vec(&envelope).unwrap()).unwrap();
+
+        assert_eq!(
+            validate_ai_analysis_result_v1(&payload).unwrap().one_line,
+            "用于生成动画的 Skill"
+        );
+    }
+
+    #[test]
+    fn deepseek_v4_flash_reasoning_only_response_is_not_treated_as_result() {
+        let envelope = serde_json::json!({
+            "id": "chatcmpl-deepseek-truncated",
+            "model": "deepseek-v4-flash",
+            "object": "chat.completion",
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": "",
+                    "reasoning_content": "reasoning omitted from fixture"
+                },
+                "finish_reason": "length"
+            }],
+            "usage": {
+                "prompt_tokens": 2353,
+                "completion_tokens": 2047,
+                "completion_tokens_details": {"reasoning_tokens": 2047}
+            }
+        });
+        let error = extract_analysis_payload(&serde_json::to_vec(&envelope).unwrap()).unwrap_err();
+
+        assert_eq!(error.code, AiErrorCode::InvalidJson);
+        assert_eq!(
+            error.message,
+            "The AI provider returned no final analysis JSON."
+        );
+    }
+
+    #[test]
+    fn payload_extraction_does_not_guess_json_from_explanatory_text() {
+        let inner = serde_json::json!({
+            "one_line": "Summary",
+            "what_it_does": "Explains",
+            "when_to_use": [],
+            "how_to_use": [],
+            "example_prompts": [],
+            "requirements": [],
+            "not_for": [],
+            "warnings": []
+        });
+        let envelope = serde_json::json!({
+            "choices": [{
+                "message": {"content": format!("Here is the result:\n```json\n{}\n```", inner)}
+            }]
+        });
+        let payload = extract_analysis_payload(&serde_json::to_vec(&envelope).unwrap()).unwrap();
+
+        assert_eq!(
+            validate_ai_analysis_result_v1(&payload).unwrap_err().code,
+            AiErrorCode::InvalidJson
+        );
     }
 
     #[test]

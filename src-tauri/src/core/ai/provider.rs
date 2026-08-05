@@ -382,7 +382,7 @@ fn build_analysis_request(
     system_prompt: &str,
     user_prompt: &str,
 ) -> Result<Request, AiCommandError> {
-    let mut request = client.post(endpoint).json(&json!({
+    let mut body = json!({
         "model": config.model,
         "messages": [
             { "role": "system", "content": system_prompt },
@@ -390,7 +390,18 @@ fn build_analysis_request(
         ],
         "max_tokens": MAX_ANALYSIS_OUTPUT_TOKENS,
         "temperature": 0
-    }));
+    });
+    if provider_supports_json_mode(&config.provider) {
+        // 已知兼容服务商支持 JSON 模式时强制声明，减少模型在正文外附加解释
+        // 导致 Schema v1 失败；本地与自定义服务保留兼容回退，避免无端 400。
+        body["response_format"] = json!({ "type": "json_object" });
+    }
+    if config.provider == "deepseek" {
+        // DeepSeek 默认会先输出 reasoning_content；关闭思考可把冻结的 2048
+        // 输出预算留给最终 Schema v1 JSON，避免 content 因 length 为空。
+        body["thinking"] = json!({ "type": "disabled" });
+    }
+    let mut request = client.post(endpoint).json(&body);
     if let Some(api_key) = api_key {
         request = request.header(AUTHORIZATION, format!("Bearer {api_key}"));
     }
@@ -404,6 +415,10 @@ fn build_analysis_request(
             false,
         )
     })
+}
+
+fn provider_supports_json_mode(provider: &str) -> bool {
+    matches!(provider, "openai" | "deepseek" | "ollama")
 }
 
 async fn read_bounded_response(
@@ -715,7 +730,35 @@ mod tests {
         assert_eq!(body["messages"][0]["content"], "system-instructions");
         assert_eq!(body["messages"][1]["role"], "user");
         assert_eq!(body["messages"][1]["content"], "untrusted-document");
+        assert_eq!(
+            body["response_format"],
+            serde_json::json!({ "type": "json_object" })
+        );
         assert!(request.headers().get(COOKIE).is_none());
+    }
+
+    #[test]
+    fn deepseek_analysis_request_enables_json_output_mode() {
+        let config = config("deepseek", "https://api.deepseek.com/v1/".into());
+        let base = validate_base_url(&config.provider, &config.base_url).unwrap();
+        let client = build_client(2, false, None).unwrap();
+        let request = build_analysis_request(
+            &client,
+            base.join(CHAT_COMPLETIONS_PATH).unwrap(),
+            &config,
+            Some("placeholder-credential"),
+            "system-instructions",
+            "untrusted-document",
+        )
+        .unwrap();
+        let body: serde_json::Value =
+            serde_json::from_slice(request.body().unwrap().as_bytes().unwrap()).unwrap();
+
+        assert_eq!(
+            body["response_format"],
+            serde_json::json!({ "type": "json_object" })
+        );
+        assert_eq!(body["thinking"], serde_json::json!({ "type": "disabled" }));
     }
 
     #[tokio::test]

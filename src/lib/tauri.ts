@@ -185,7 +185,7 @@ export interface ProjectSkillDocument {
 
 // Keep the settings command boundary aligned with Rust's snake_case DTOs so
 // credentials never need a frontend-side transformation or cached alias.
-export type AiProvider = "openai" | "deepseek" | "openrouter" | "ollama" | "custom";
+export type AiProvider = "openai" | "deepseek" | "ollama";
 export type AiOutputLanguage = "auto" | "zh" | "zh-TW" | "en";
 
 export interface AiConfigInput {

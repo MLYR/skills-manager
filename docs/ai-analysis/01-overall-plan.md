@@ -82,7 +82,7 @@ AI 必须返回 JSON，不接受 Markdown 作为正式结果：
 }
 ```
 
-规则：不得补造能力；无法从原文确定时写“原文未说明”；字段缺失、类型错误或 JSON 非法均视为失败。输出协议必须带 `schema_version`，协议升级后旧结果标记为待更新。
+规则：不得补造能力；模型应基于文档上下文做保守归纳，而不是输出“原文未说明”占位文本；无法提炼出有用条目时对应数组返回空数组。字段缺失、类型错误或 JSON 非法均视为失败。输出协议必须带 `schema_version`，协议升级后旧结果标记为待更新。系统提示词必须重复 Schema v1 的字段、字符数和数组项数硬限制，避免 JSON 合法但无法保存的响应。对 OpenAI Compatible JSON 模式的三家服务商（OpenAI、DeepSeek、Ollama）请求必须携带 `response_format: {"type":"json_object"}`；DeepSeek 的分析请求还必须显式传递 `thinking: {"type":"disabled"}`，避免其默认思考内容耗尽固定的 `max_tokens=2048` 而没有最终 JSON。为兼容仍错误包裹结果的模型，仅允许去除“全文唯一、无额外说明”的 ` ```json ... ``` ` 或 ` ``` ... ``` ` 围栏后再执行原有严格 Schema v1 校验，禁止从任意自然语言中截取或猜测 JSON。
 
 ## 6. 提示词安全
 
@@ -100,7 +100,7 @@ AI 必须返回 JSON，不接受 Markdown 作为正式结果：
 
 | 配置 | 存储位置 | 默认值 |
 |---|---|---|
-| provider | SQLite settings | custom/openai-compatible |
+| provider | SQLite settings | openai/deepseek/ollama |
 | base_url | SQLite settings | 用户填写或预设 |
 | model | SQLite settings | 用户填写 |
 | api_key | SQLite settings（应用本地配置） | 无 |
@@ -109,7 +109,7 @@ AI 必须返回 JSON，不接受 Markdown 作为正式结果：
 | log_retention_days | SQLite settings | 30 |
 | output_language | SQLite settings | 跟随应用语言 |
 
-内置 OpenAI、DeepSeek、OpenRouter、Ollama 和自定义预设。连接测试只发送最小请求，错误信息必须可读且经过敏感信息清理。
+内置 OpenAI、DeepSeek 和 Ollama 预设，不提供 OpenRouter 或自定义服务商入口。三者的解析请求统一携带 OpenAI Compatible `response_format: {"type":"json_object"}`；DeepSeek 额外关闭 thinking。连接测试只发送最小请求，错误信息必须可读且经过敏感信息清理。历史 OpenRouter/custom 本地配置读取时降级为未配置的 OpenAI 默认项且不复用旧 Key，必须由用户重新选择并保存，避免错误服务商使用旧凭据。
 
 模型列表按需获取：设置页使用当前未保存的 Provider、Base URL 和 API Key 调用 `get_ai_models`，后端向 `base_url + models` 发起 OpenAI Compatible `GET` 请求，解析响应中的 `data[].id`，去重并按模型 ID 排序后返回。获取失败只提示错误并保留当前模型，仍允许用户手动保存已有模型；页面不自动刷新模型列表，避免打开设置页时增加网络等待。
 
@@ -137,7 +137,7 @@ running --应用异常退出--> interrupted -> queued
 
 ### `ai_analysis_logs`
 
-保存任务、Skill、实际提示词、原始响应、HTTP 状态码、错误、耗时、Token 和时间。严禁保存 API Key、Authorization、Cookie、完整请求头和本地配置内容。
+保存任务、Skill、实际提示词、原始响应、HTTP 状态码、错误、耗时、Token 和时间。严禁保存 API Key、Authorization、Cookie、完整请求头和本地配置内容。模型返回 HTTP 成功但 JSON 语法或 Schema 校验失败时，必须另存经统一脱敏且最多 64KiB 的实际响应，供管理页排查；该诊断日志不能代替结构化错误，也不能绕过响应内容上限。
 
 ## 9. 限流、重试与恢复
 
@@ -211,7 +211,7 @@ not_for: string[]
 warnings: string[]
 ```
 
-`schema_version=1`和`prompt_version`属于可信信封元数据，不由模型填写。保存前按“JSON语法 -> 精确字段和类型 -> 字符串长度、数组项数和总结果大小”顺序校验；未知字段、缺失字段、空白`one_line`或超限内容均失败。字段无法从原文确定时必须写“原文未说明”，不得补造。
+`schema_version=1`和`prompt_version`属于可信信封元数据，不由模型填写。保存前按“JSON语法 -> 精确字段和类型 -> 字符串长度、数组项数和总结果大小”顺序校验；未知字段、缺失字段、空白`one_line`、占位文本“原文未说明”或超限内容均失败。模型不得把文档缺失的细节捏造成事实，但应从可见上下文提炼通用使用方式；没有有用条目时数组保持为空。
 
 Schema v1大小上限固定如下，字符数均指Unicode scalar value数量，字节数均指UTF-8原始字节：
 
@@ -273,9 +273,9 @@ Schema v1大小上限固定如下，字符数均指Unicode scalar value数量，
 
 索引固定为：`ux_skill_ai_analyses_target(target_kind,target_key)`；`ix_ai_analysis_batches_status_created(status,created_at,id)`；`ux_ai_analysis_jobs_batch_ordinal(batch_id,ordinal)`；`ix_ai_analysis_jobs_claim(status,next_retry_at,priority DESC,created_at,batch_id,ordinal,id)`；`ux_ai_analysis_jobs_active_target(target_kind,target_key) WHERE status IN ('queued','running','retry_wait','interrupted')`；`ix_ai_analysis_jobs_target_updated(target_kind,target_key,updated_at DESC,id DESC)`；`ix_ai_analysis_logs_created(created_at,id)`；`ix_ai_analysis_logs_job(job_id)`；`ix_ai_analysis_logs_filters(event_kind,error_code,batch_id,created_at DESC,id DESC)`。Runner领取排序固定为`priority DESC`，随后`created_at ASC,batch_id ASC,ordinal ASC,id ASC`；分页列表按各自`created_at DESC,id DESC`。所有布尔整数限制为0/1；计数、Token、价格、耗时、ordinal和priority按业务要求使用非负`CHECK`；可空数值用`value IS NULL OR value >= 0`。迁移测试必须覆盖新库、真实v7旧库、重复执行和事务失败回滚。
 
-普通配置原子写入现有`settings`表单键`ai_analysis_config_v1`，值为JSON对象：`provider/base_url/model/timeout_seconds/concurrency/log_retention_days/output_language/api_key`。旧配置中的`input_price_micros_per_million/output_price_micros_per_million`只为兼容读取，不再参与校验、估算或展示；其中`api_key`属于应用本地配置，不进入AI日志、批次快照或响应DTO之外的调试输出；settings沿用现有本地加密存储。约束为provider=`openai|deepseek|openrouter|ollama|custom`，timeout 1～300默认60，并发1～5默认1，保留期1～3650默认30，语言=`auto|zh|zh-TW|en`；预览时把`auto`解析为具体语言写入批次快照。Base URL定义为“OpenAI Compatible API根”，必须包含服务所需的版本路径并以`/`结尾；固定请求端点为相对字符串`chat/completions`，客户端绝不自动插入`v1`。预设固定为OpenAI=`https://api.openai.com/v1/`、DeepSeek=`https://api.deepseek.com/v1/`、OpenRouter=`https://openrouter.ai/api/v1/`、Ollama=`http://127.0.0.1:11434/v1/`；custom若需要v1必须由用户在Base URL中提供。HTTPS可携带Key；HTTP只允许`localhost`、`127.0.0.0/8`或`::1`回环地址且Provider声明`api_key_required=false`，请求不得附加Authorization或任何Key。其他明文HTTP一律返回`invalid_base_url`。URL拒绝userinfo、fragment和query；`reqwest`重定向策略为none，防止Authorization被转发。Ollama预设声明无需Key。
+普通配置原子写入现有`settings`表单键`ai_analysis_config_v1`，值为JSON对象：`provider/base_url/model/timeout_seconds/concurrency/log_retention_days/output_language/api_key`。旧配置中的`input_price_micros_per_million/output_price_micros_per_million`只为兼容读取，不再参与校验、估算或展示；其中`api_key`属于应用本地配置，不进入AI日志、批次快照或响应DTO之外的调试输出；settings沿用现有本地加密存储。约束为provider=`openai|deepseek|ollama`，timeout 1～300默认60，并发1～5默认1，保留期1～3650默认30，语言=`auto|zh|zh-TW|en`；预览时把`auto`解析为具体语言写入批次快照。历史`openrouter/custom`配置读取时仅返回未配置的OpenAI默认项并忽略旧Key，直到用户重新选择并保存。Base URL定义为“OpenAI Compatible API根”，必须包含服务所需的版本路径并以`/`结尾；固定请求端点为相对字符串`chat/completions`，客户端绝不自动插入`v1`。预设固定为OpenAI=`https://api.openai.com/v1/`、DeepSeek=`https://api.deepseek.com/v1/`、Ollama=`http://127.0.0.1:11434/v1/`。HTTPS可携带Key；HTTP只允许`localhost`、`127.0.0.0/8`或`::1`回环地址且Provider声明`api_key_required=false`，请求不得附加Authorization或任何Key。其他明文HTTP一律返回`invalid_base_url`。URL拒绝userinfo、fragment和query；`reqwest`重定向策略为none，防止Authorization被转发。Ollama预设声明无需Key。
 
-Provider密钥规则固定为：`ollama`的`api_key_required=false`，`openai/deepseek/openrouter/custom`均为`true`；第一版不支持custom无Key模式，避免前端或服务端自行猜测。新Key按UTF-8原始字节限制1～16,384字节，去除首尾空白后为空表示清除本地配置，非空值保留用户提交的原始字符串。配置JSON损坏时，自动日志清理仍按隐私优先使用30天默认保留期并记录不含配置原文的`invalid_config`警告，避免损坏配置导致日志永久保留。
+Provider密钥规则固定为：`ollama`的`api_key_required=false`，`openai/deepseek`均为`true`。新Key按UTF-8原始字节限制1～16,384字节，去除首尾空白后为空表示清除本地配置，非空值保留用户提交的原始字符串。配置JSON损坏时，自动日志清理仍按隐私优先使用30天默认保留期并记录不含配置原文的`invalid_config`警告，避免损坏配置导致日志永久保留。
 
 ### 13.4 持久状态机
 
@@ -316,7 +316,7 @@ Runner只从`queued/running`且`pause_requested=0/cancel_requested=0`的批次�
 
 预览注册表只存在Rust进程内存，默认10分钟TTL，不写SQLite；条目保存目标顺序、规范内容、哈希、估算和非密钥配置快照。`preview_id`不可猜测、只能成功消费一次。应用重启或TTL到期后必须重新预览。
 
-`enqueue_ai_analysis`开始即从注册表原子移除`preview_id`，无论复检或建库是否成功都不可重放；重新收集全部目标并逐一比较身份、顺序和哈希，任一变化则整批零写入。重复目标在预览阶段直接拒绝；零有效文档不得创建空批次。批次保存确认时会影响请求语义的非密钥快照（provider/base_url/model/output_language/schema/prompt/timeout），后续设置变更不影响它；`concurrency`和`log_retention_days`明确是全局运行/清理策略，不进入批次快照，变更只影响Runner并发上限和日志清理时点。Runner从同一SQLite settings读取当前本地 Key，Key不进入批次快照。`total_targets`是输入目标数，`valid_documents`是会建Job的数量，`missing_documents`只统计无文档，`skipped_targets`只统计因mode已是最新而跳过。Runner只能领取已持久化且批次未暂停、未取消的任务。预览和扫描不调用模型。
+`enqueue_ai_analysis`开始即从注册表原子移除`preview_id`，无论复检或建库是否成功都不可重放；重新收集全部目标并逐一比较身份、顺序和哈希，任一变化则整批零写入。重复目标在预览阶段直接拒绝；零有效文档不得创建空批次。批次保存确认时会影响请求语义的非密钥快照（provider/base_url/model/output_language/schema/prompt/timeout），后续设置变更不影响它；`concurrency`和`log_retention_days`明确是全局运行/清理策略，不进入批次快照，变更只影响Runner并发上限和日志清理时点。Runner从同一SQLite settings读取当前本地 Key，Key不进入批次快照。`total_targets`是输入目标数，`valid_documents`是会建Job的数量，`missing_documents`只统计无文档，`skipped_targets`只统计因mode已是最新而跳过。管理页“一键解析”的`missing_only`表示“没有有效 AI 解读”：允许`unparsed`和最近任务为`failed`的目标进入预览，始终跳过`succeeded`、`stale`和活动任务；失败项仍须展示预览并由用户确认后才会重试。Runner只能领取已持久化且批次未暂停、未取消的任务。预览和扫描不调用模型。
 
 连接测试分为本地校验和真实模型测试：`confirm_billable_request=false`时只校验配置和URL，不发网络请求；为`true`时发送不含Skill内容的最小completion，UI必须提前提示可能产生服务商费用。连接测试不创建Batch、Job、Analysis或AI日志，并在结果中返回`billable_request_sent`。
 

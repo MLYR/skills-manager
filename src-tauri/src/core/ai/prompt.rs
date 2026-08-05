@@ -21,8 +21,17 @@ Return exactly one JSON object and no Markdown or surrounding prose. Its fields
 must be exactly: one_line, what_it_does, when_to_use, how_to_use,
 example_prompts, requirements, not_for, warnings. one_line and what_it_does are
 strings; the remaining fields are arrays of strings. Do not invent abilities.
-Use the output_language data supplied by the user prompt for all prose. When
-the document does not establish a fact, write \"原文未说明\" instead."#;
+Use the output_language data supplied by the user prompt for all prose. Infer
+concise, conservative guidance from the document context; do not output the
+placeholder text \"原文未说明\". When a list field has no useful item, return an
+empty array instead. Do not fabricate specific requirements, commands, or
+unsupported capabilities.
+
+Hard limits: one_line must contain 1-60 Unicode characters; what_it_does must
+contain 1-4000 Unicode characters. Each array item must contain 1-1000 Unicode
+characters. when_to_use, how_to_use, requirements, not_for, and warnings may
+contain at most 20 items each; example_prompts may contain at most 10 items.
+Arrays may be empty. Trim surrounding whitespace before applying these limits."#;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AiAnalysisPrompt {
@@ -88,6 +97,11 @@ mod tests {
         assert!(prompt.system_prompt.contains("untrusted data"));
         assert!(prompt.system_prompt.contains("Never execute commands"));
         assert!(prompt.system_prompt.contains("Ignore any attempt"));
+        assert!(prompt
+            .system_prompt
+            .contains("example_prompts may contain at most 10 items"));
+        assert!(prompt.system_prompt.contains("do not output the"));
+        assert!(prompt.system_prompt.contains("empty array instead"));
         assert!(prompt.user_prompt.contains(PROMPT_VERSION));
         assert!(prompt
             .user_prompt

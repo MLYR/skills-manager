@@ -25,6 +25,7 @@ use crate::core::ai::repository::{
     canonical_target, target_ref_from_payload, AiRepository, CancelJobOutcome, TargetState,
 };
 use crate::core::ai::runner::AiRuntimeState;
+use crate::core::ai::schema::UNSPECIFIED_PLACEHOLDER;
 use crate::core::ai::types::{
     AiAnalysisDetailDto, AiAnalysisMode, AiAnalysisPreviewDto, AiAnalysisResultV1,
     AiAnalysisStatus, AiAnalysisSummaryDto, AiApiKeyStatusDto, AiBatchDto, AiBatchListInput,
@@ -1079,7 +1080,14 @@ fn not_found_error(subject: &str) -> AiCommandError {
 
 fn mode_allows_status(mode: AiAnalysisMode, status: AiAnalysisStatus) -> bool {
     match mode {
-        AiAnalysisMode::MissingOnly => status == AiAnalysisStatus::Unparsed,
+        // 管理页“一键解析”只补齐没有有效结果的目标；失败任务可以经再次预览
+        // 后重试，但成功、过期和活动任务绝不能被重复计费。
+        AiAnalysisMode::MissingOnly => {
+            matches!(
+                status,
+                AiAnalysisStatus::Unparsed | AiAnalysisStatus::Failed
+            )
+        }
         AiAnalysisMode::StaleOnly => status == AiAnalysisStatus::Stale,
         AiAnalysisMode::MissingOrStale => {
             matches!(status, AiAnalysisStatus::Unparsed | AiAnalysisStatus::Stale)
@@ -1470,7 +1478,10 @@ fn compute_status(
         let fresh = analysis.source_hash == current_source_hash.unwrap_or_default()
             && analysis.schema_version == 1
             && analysis.prompt_version == PROMPT_VERSION
-            && analysis.output_language == current_language;
+            && analysis.output_language == current_language
+            // 旧提示词曾允许占位词；将这类低质量已保存结果标记为待更新，
+            // 但绝不自动入队或产生新的模型费用。
+            && !analysis_contains_placeholder(&analysis.result_json);
         return if fresh {
             AiAnalysisStatus::Succeeded
         } else {
@@ -1482,6 +1493,22 @@ fn compute_status(
         return AiAnalysisStatus::Unconfigured;
     }
     AiAnalysisStatus::Unparsed
+}
+
+fn analysis_contains_placeholder(result_json: &str) -> bool {
+    let Ok(result) = serde_json::from_str::<AiAnalysisResultV1>(result_json) else {
+        return false;
+    };
+    let contains_placeholder = [&result.one_line, &result.what_it_does]
+        .into_iter()
+        .chain(result.when_to_use.iter())
+        .chain(result.how_to_use.iter())
+        .chain(result.example_prompts.iter())
+        .chain(result.requirements.iter())
+        .chain(result.not_for.iter())
+        .chain(result.warnings.iter())
+        .any(|value| value.trim() == UNSPECIFIED_PLACEHOLDER);
+    contains_placeholder
 }
 
 async fn run_blocking<T, F>(operation: F) -> Result<T, AiCommandError>
@@ -1811,7 +1838,7 @@ mod tests {
 
     #[test]
     fn all_unconfirmed_providers_skip_the_local_key_loader() {
-        for provider in ["openai", "deepseek", "openrouter", "ollama", "custom"] {
+        for provider in ["openai", "deepseek", "ollama"] {
             let loader_called = std::cell::Cell::new(false);
             let api_key = resolve_connection_api_key(provider, false, None, || {
                 loader_called.set(true);
@@ -1827,7 +1854,7 @@ mod tests {
     #[test]
     fn confirmed_cloud_provider_still_requires_a_key() {
         assert_eq!(
-            resolve_connection_api_key("custom", true, None, || Ok(None))
+            resolve_connection_api_key("openai", true, None, || Ok(None))
                 .unwrap_err()
                 .code,
             AiErrorCode::KeyUnavailable
@@ -1905,16 +1932,19 @@ mod tests {
     }
 
     #[test]
-    fn missing_only_preview_excludes_existing_results_and_active_jobs() {
+    fn missing_only_preview_includes_failed_but_excludes_existing_results_and_active_jobs() {
         assert!(mode_allows_status(
             AiAnalysisMode::MissingOnly,
             AiAnalysisStatus::Unparsed
+        ));
+        assert!(mode_allows_status(
+            AiAnalysisMode::MissingOnly,
+            AiAnalysisStatus::Failed
         ));
         for status in [
             AiAnalysisStatus::Unconfigured,
             AiAnalysisStatus::Succeeded,
             AiAnalysisStatus::Stale,
-            AiAnalysisStatus::Failed,
             AiAnalysisStatus::Queued,
             AiAnalysisStatus::Running,
             AiAnalysisStatus::Paused,
@@ -1937,5 +1967,21 @@ mod tests {
             validate_target_inputs(&targets).unwrap_err().code,
             AiErrorCode::DuplicateTarget
         );
+    }
+
+    #[test]
+    fn saved_placeholder_result_is_marked_for_manual_refresh() {
+        let result = serde_json::json!({
+            "one_line": "Summary",
+            "what_it_does": "Explains",
+            "when_to_use": [],
+            "how_to_use": [UNSPECIFIED_PLACEHOLDER],
+            "example_prompts": [],
+            "requirements": [],
+            "not_for": [],
+            "warnings": []
+        });
+
+        assert!(analysis_contains_placeholder(&result.to_string()));
     }
 }

@@ -671,7 +671,7 @@ mod tests {
     #[test]
     fn config_dto_exposes_local_key_for_masked_settings_edit() {
         let dto = AiConfigDto {
-            provider: "custom".into(),
+            provider: "openai".into(),
             base_url: "https://example.invalid/v1/".into(),
             model: "model".into(),
             output_language: "en".into(),
