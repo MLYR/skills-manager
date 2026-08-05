@@ -196,11 +196,10 @@ export interface AiConfigInput {
   timeout_seconds: number;
   concurrency: number;
   log_retention_days: number;
-  input_price_micros_per_million: number | null;
-  output_price_micros_per_million: number | null;
 }
 
 export interface AiConfigDto extends AiConfigInput {
+  api_key: string | null;
   has_api_key: boolean;
   is_configured: boolean;
 }
@@ -217,8 +216,13 @@ export interface AiProviderPresetDto {
   api_key_required: boolean;
 }
 
+export interface AiModelDto {
+  id: string;
+}
+
 export interface AiConnectionTestInput {
   config: AiConfigInput;
+  api_key: string | null;
   confirm_billable_request: boolean;
 }
 
@@ -266,8 +270,6 @@ export interface AiAnalysisPreviewDto {
   total_characters: number;
   estimated_input_tokens: number;
   estimated_output_tokens: number;
-  estimated_cost_micros: number | null;
-  estimated_max_retry_cost_micros: number | null;
   provider: string;
   base_url: string;
   model: string;
@@ -384,8 +386,6 @@ export interface AiBatchDto {
   skipped_targets: number;
   estimated_input_tokens: number;
   estimated_output_tokens: number;
-  estimated_cost_micros: number | null;
-  estimated_max_retry_cost_micros: number | null;
   jobs_queued: number;
   jobs_running: number;
   jobs_retry_wait: number;
@@ -706,7 +706,12 @@ export const getAiProviderPresets = () =>
 export const getAiConfig = () =>
   invoke<AiConfigDto>("get_ai_config");
 
-export const saveAiConfig = (input: AiConfigInput) =>
+export const getAiModels = (input: {
+  config: AiConfigInput;
+  api_key: string | null;
+}) => invoke<AiModelDto[]>("get_ai_models", { input });
+
+export const saveAiConfig = (input: { config: AiConfigInput; api_key: string }) =>
   invoke<AiConfigDto>("save_ai_config", { input });
 
 export const getAiApiKeyStatus = () =>

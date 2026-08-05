@@ -1,13 +1,15 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { confirm as dialogConfirm } from "@tauri-apps/plugin-dialog";
 import {
   AlertCircle,
   CheckCircle2,
+  Eye,
+  EyeOff,
   KeyRound,
   Loader2,
+  RefreshCw,
   Save,
   ShieldCheck,
-  Trash2,
   Wifi,
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
@@ -31,8 +33,6 @@ const AI_PROVIDERS: readonly AiProvider[] = [
   "custom",
 ];
 const AI_OUTPUT_LANGUAGES: readonly AiOutputLanguage[] = ["auto", "zh", "zh-TW", "en"];
-const MAX_PRICE_MICROS_PER_MILLION = 1_000_000_000_000_000;
-
 interface AiConfigForm {
   provider: AiProvider;
   baseUrl: string;
@@ -41,8 +41,6 @@ interface AiConfigForm {
   timeoutSeconds: string;
   concurrency: string;
   logRetentionDays: string;
-  inputPrice: string;
-  outputPrice: string;
 }
 
 interface Feedback {
@@ -76,8 +74,6 @@ function configToForm(config: AiConfigDto): AiConfigForm {
     timeoutSeconds: String(config.timeout_seconds),
     concurrency: String(config.concurrency),
     logRetentionDays: String(config.log_retention_days),
-    inputPrice: config.input_price_micros_per_million?.toString() ?? "",
-    outputPrice: config.output_price_micros_per_million?.toString() ?? "",
   };
 }
 
@@ -86,22 +82,9 @@ function parseRequiredInteger(value: string, min: number, max: number): number |
   return Number.isSafeInteger(parsed) && parsed >= min && parsed <= max ? parsed : null;
 }
 
-function parseOptionalPrice(value: string): { valid: boolean; value: number | null } {
-  const trimmed = value.trim();
-  if (!trimmed) return { valid: true, value: null };
-  const parsed = Number(trimmed);
-  return {
-    valid:
-      Number.isSafeInteger(parsed) &&
-      parsed >= 0 &&
-      parsed <= MAX_PRICE_MICROS_PER_MILLION,
-    value: Number.isSafeInteger(parsed) ? parsed : null,
-  };
-}
-
 // Validate and normalize every field before any command invocation; the Rust
 // backend remains authoritative for URL policy and all security checks.
-function buildConfig(form: AiConfigForm): ConfigBuildResult {
+function buildConfig(form: AiConfigForm, allowEmptyModel = false): ConfigBuildResult {
   if (!isAiProvider(form.provider)) {
     return { config: null, errorKey: "providerInvalid" };
   }
@@ -111,7 +94,7 @@ function buildConfig(form: AiConfigForm): ConfigBuildResult {
   const baseUrl = form.baseUrl.trim();
   if (!baseUrl) return { config: null, errorKey: "baseUrlRequired" };
   const model = form.model.trim();
-  if (!model) return { config: null, errorKey: "modelRequired" };
+  if (!model && !allowEmptyModel) return { config: null, errorKey: "modelRequired" };
 
   const timeoutSeconds = parseRequiredInteger(form.timeoutSeconds, 1, 300);
   if (timeoutSeconds === null) return { config: null, errorKey: "timeoutInvalid" };
@@ -119,11 +102,6 @@ function buildConfig(form: AiConfigForm): ConfigBuildResult {
   if (concurrency === null) return { config: null, errorKey: "concurrencyInvalid" };
   const logRetentionDays = parseRequiredInteger(form.logRetentionDays, 1, 3650);
   if (logRetentionDays === null) return { config: null, errorKey: "retentionInvalid" };
-
-  const inputPrice = parseOptionalPrice(form.inputPrice);
-  if (!inputPrice.valid) return { config: null, errorKey: "inputPriceInvalid" };
-  const outputPrice = parseOptionalPrice(form.outputPrice);
-  if (!outputPrice.valid) return { config: null, errorKey: "outputPriceInvalid" };
 
   return {
     config: {
@@ -134,8 +112,6 @@ function buildConfig(form: AiConfigForm): ConfigBuildResult {
       timeout_seconds: timeoutSeconds,
       concurrency,
       log_retention_days: logRetentionDays,
-      input_price_micros_per_million: inputPrice.value,
-      output_price_micros_per_million: outputPrice.value,
     },
     errorKey: null,
   };
@@ -143,15 +119,17 @@ function buildConfig(form: AiConfigForm): ConfigBuildResult {
 
 export function AiSettingsSection() {
   const { t } = useTranslation();
-  const apiKeyInputRef = useRef<HTMLInputElement>(null);
   const [presets, setPresets] = useState<AiProviderPresetDto[]>([]);
   const [form, setForm] = useState<AiConfigForm | null>(null);
-  const [hasApiKey, setHasApiKey] = useState(false);
+  const [modelOptions, setModelOptions] = useState<string[]>([]);
+  const [modelsLoaded, setModelsLoaded] = useState(false);
+  const [loadingModels, setLoadingModels] = useState(false);
+  const [modelLoadError, setModelLoadError] = useState<string | null>(null);
+  const [apiKey, setApiKey] = useState("");
+  const [showApiKey, setShowApiKey] = useState(false);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [savingConfig, setSavingConfig] = useState(false);
-  const [savingApiKey, setSavingApiKey] = useState(false);
-  const [deletingApiKey, setDeletingApiKey] = useState(false);
   const [testing, setTesting] = useState<"local" | "paid" | null>(null);
   const [feedback, setFeedback] = useState<Feedback | null>(null);
   const [testResult, setTestResult] = useState<AiConnectionTestDto | null>(null);
@@ -170,10 +148,9 @@ export function AiSettingsSection() {
     setLoading(true);
     setLoadError(null);
     try {
-      const [providerPresets, config, keyStatus] = await Promise.all([
+      const [providerPresets, config] = await Promise.all([
         api.getAiProviderPresets(),
         api.getAiConfig(),
-        api.getAiApiKeyStatus(),
       ]);
       // Reject malformed serialized enums rather than silently replacing a
       // potentially cost-sensitive provider configuration.
@@ -187,7 +164,10 @@ export function AiSettingsSection() {
       }
       setPresets(providerPresets);
       setForm(configToForm(config));
-      setHasApiKey(keyStatus.has_api_key);
+      setModelOptions([]);
+      setModelsLoaded(false);
+      setModelLoadError(null);
+      setApiKey(config.api_key ?? "");
     } catch (error) {
       setLoadError(errorMessage(error));
     } finally {
@@ -221,6 +201,36 @@ export function AiSettingsSection() {
     );
     setFeedback(null);
     setTestResult(null);
+    // 模型列表属于 Provider/Base URL 组合，切换服务商后必须避免展示旧端点的候选项。
+    setModelOptions([]);
+    setModelsLoaded(false);
+    setModelLoadError(null);
+  };
+
+  const handleRefreshModels = async () => {
+    if (!form) return;
+    const built = buildConfig(form, true);
+    if (!built.config) {
+      showValidationError(built.errorKey);
+      return;
+    }
+
+    setLoadingModels(true);
+    setModelLoadError(null);
+    try {
+      const models = await api.getAiModels({
+        config: built.config,
+        api_key: apiKey.trim() ? apiKey : null,
+      });
+      const ids = models.map((model) => model.id);
+      setModelOptions(ids);
+      setModelsLoaded(true);
+    } catch (error) {
+      setModelsLoaded(false);
+      setModelLoadError(errorMessage(error));
+    } finally {
+      setLoadingModels(false);
+    }
   };
 
   const handleSaveConfig = async () => {
@@ -234,11 +244,11 @@ export function AiSettingsSection() {
     setSavingConfig(true);
     setFeedback(null);
     try {
-      const saved = await api.saveAiConfig(result.config);
+      const saved = await api.saveAiConfig({ config: result.config, api_key: apiKey });
+      setApiKey(saved.api_key ?? "");
       setForm(configToForm(saved));
-      setHasApiKey(saved.has_api_key);
       setTestResult(null);
-      const message = t("settings.ai.configSaved");
+      const message = t("settings.ai.configAndApiKeySaved");
       setFeedback({ kind: "success", message });
       toast.success(message);
     } catch (error) {
@@ -247,64 +257,6 @@ export function AiSettingsSection() {
       toast.error(message);
     } finally {
       setSavingConfig(false);
-    }
-  };
-
-  const handleSaveApiKey = async () => {
-    let apiKey: string | null = null;
-    let input: { api_key: string } | null = null;
-    setSavingApiKey(true);
-    setFeedback(null);
-    try {
-      // The credential enters memory only at invocation time and is never
-      // copied into React state, storage, logs, feedback, or a controlled prop.
-      apiKey = apiKeyInputRef.current?.value ?? "";
-      // Whitespace normalization is only a presence check: the exact original
-      // credential must be written to Keyring without altering valid bytes.
-      if (!apiKey.trim()) {
-        showValidationError("apiKeyRequired");
-        return;
-      }
-      input = { api_key: apiKey };
-      const status = await api.setAiApiKey(input);
-      setHasApiKey(status.has_api_key);
-      const message = t("settings.ai.apiKeySaved");
-      setFeedback({ kind: "success", message });
-      toast.success(message);
-    } catch (error) {
-      const message = errorMessage(error);
-      setFeedback({ kind: "error", message });
-      toast.error(message);
-    } finally {
-      if (apiKeyInputRef.current) apiKeyInputRef.current.value = "";
-      input = null;
-      apiKey = null;
-      setSavingApiKey(false);
-    }
-  };
-
-  const handleDeleteApiKey = async () => {
-    const confirmed = await dialogConfirm(t("settings.ai.apiKeyDeleteConfirm"), {
-      title: t("settings.ai.apiKeyDeleteTitle"),
-      kind: "warning",
-    });
-    if (!confirmed) return;
-
-    setDeletingApiKey(true);
-    setFeedback(null);
-    try {
-      const status = await api.deleteAiApiKey();
-      setHasApiKey(status.has_api_key);
-      const message = t("settings.ai.apiKeyDeleted");
-      setFeedback({ kind: "success", message });
-      toast.success(message);
-    } catch (error) {
-      const message = errorMessage(error);
-      setFeedback({ kind: "error", message });
-      toast.error(message);
-    } finally {
-      if (apiKeyInputRef.current) apiKeyInputRef.current.value = "";
-      setDeletingApiKey(false);
     }
   };
 
@@ -322,6 +274,8 @@ export function AiSettingsSection() {
     try {
       const result = await api.testAiConnection({
         config: built.config,
+        // 连接测试使用当前输入值，避免被旧的本地配置覆盖。
+        api_key: apiKey.trim() ? apiKey : null,
         confirm_billable_request: confirmBillableRequest,
       });
       setTestResult(result);
@@ -364,7 +318,8 @@ export function AiSettingsSection() {
     ? presets.find((preset) => preset.id === form.provider)
     : undefined;
   const requiresApiKey = selectedPreset?.api_key_required ?? form?.provider !== "ollama";
-  const isBusy = savingConfig || savingApiKey || deletingApiKey || testing !== null;
+  const hasApiKey = apiKey.trim().length > 0;
+  const isBusy = savingConfig || testing !== null || loadingModels;
 
   return (
     <section>
@@ -418,15 +373,67 @@ export function AiSettingsSection() {
 
                 <label className="block text-[12px] text-muted">
                   <span className="mb-1 block">{t("settings.ai.model")}</span>
-                  <input
-                    type="text"
-                    value={form.model}
-                    onChange={(event) => setForm({ ...form, model: event.target.value })}
-                    disabled={isBusy}
-                    placeholder={t("settings.ai.modelPlaceholder")}
-                    className={fieldClass}
-                    spellCheck={false}
-                  />
+                  <div className="flex items-center gap-2">
+                    {modelsLoaded && modelOptions.length > 0 ? (
+                      <select
+                        value={form.model}
+                        onChange={(event) => setForm({ ...form, model: event.target.value })}
+                        disabled={isBusy}
+                        className={`${fieldClass} appearance-none`}
+                      >
+                        {!form.model.trim() && (
+                          <option value="" disabled>
+                            {t("settings.ai.modelPlaceholder")}
+                          </option>
+                        )}
+                        {form.model.trim() && !modelOptions.includes(form.model) && (
+                          <option value={form.model}>{form.model}</option>
+                        )}
+                        {modelOptions.map((model) => (
+                          <option key={model} value={model}>
+                            {model}
+                          </option>
+                        ))}
+                      </select>
+                    ) : (
+                      <input
+                        type="text"
+                        value={form.model}
+                        onChange={(event) => setForm({ ...form, model: event.target.value })}
+                        disabled={isBusy}
+                        placeholder={t("settings.ai.modelPlaceholder")}
+                        className={fieldClass}
+                        spellCheck={false}
+                      />
+                    )}
+                    <button
+                      type="button"
+                      onClick={() => void handleRefreshModels()}
+                      disabled={isBusy}
+                      aria-label={t("settings.ai.refreshModels")}
+                      title={t("settings.ai.refreshModels")}
+                      className={`${buttonClass} shrink-0 border-border-subtle text-tertiary hover:bg-surface-hover`}
+                    >
+                      <RefreshCw className={`h-3.5 w-3.5 ${loadingModels ? "animate-spin" : ""}`} />
+                      <span className="hidden sm:inline">
+                        {loadingModels
+                          ? t("settings.ai.refreshingModels")
+                          : t("settings.ai.refreshModels")}
+                      </span>
+                    </button>
+                  </div>
+                  <span
+                    className={`mt-1 block text-[11px] ${modelLoadError ? "text-red-500" : "text-muted"}`}
+                    aria-live="polite"
+                  >
+                    {modelLoadError
+                      ? modelLoadError
+                      : modelsLoaded
+                        ? modelOptions.length > 0
+                          ? t("settings.ai.modelsLoaded", { count: modelOptions.length })
+                          : t("settings.ai.modelsEmpty")
+                        : t("settings.ai.modelsHint")}
+                  </span>
                 </label>
 
                 <label className="block text-[12px] text-muted md:col-span-2">
@@ -435,7 +442,13 @@ export function AiSettingsSection() {
                     type="text"
                     inputMode="url"
                     value={form.baseUrl}
-                    onChange={(event) => setForm({ ...form, baseUrl: event.target.value })}
+                    onChange={(event) => {
+                      setForm({ ...form, baseUrl: event.target.value });
+                      // Base URL changes invalidate every previously fetched model ID.
+                      setModelOptions([]);
+                      setModelsLoaded(false);
+                      setModelLoadError(null);
+                    }}
                     disabled={isBusy}
                     placeholder={t("settings.ai.baseUrlPlaceholder")}
                     className={`${fieldClass} font-mono`}
@@ -505,48 +518,6 @@ export function AiSettingsSection() {
                   />
                 </label>
 
-                <label className="block text-[12px] text-muted">
-                  <span className="mb-1 block">{t("settings.ai.inputPrice")}</span>
-                  <input
-                    type="number"
-                    min={0}
-                    max={MAX_PRICE_MICROS_PER_MILLION}
-                    step={1}
-                    value={form.inputPrice}
-                    onChange={(event) => setForm({ ...form, inputPrice: event.target.value })}
-                    disabled={isBusy}
-                    placeholder={t("settings.ai.pricePlaceholder")}
-                    className={fieldClass}
-                  />
-                </label>
-
-                <label className="block text-[12px] text-muted">
-                  <span className="mb-1 block">{t("settings.ai.outputPrice")}</span>
-                  <input
-                    type="number"
-                    min={0}
-                    max={MAX_PRICE_MICROS_PER_MILLION}
-                    step={1}
-                    value={form.outputPrice}
-                    onChange={(event) => setForm({ ...form, outputPrice: event.target.value })}
-                    disabled={isBusy}
-                    placeholder={t("settings.ai.pricePlaceholder")}
-                    className={fieldClass}
-                  />
-                </label>
-              </div>
-
-              <p className="text-[12px] text-muted">{t("settings.ai.priceDesc")}</p>
-              <div className="flex justify-end">
-                <button
-                  type="button"
-                  onClick={() => void handleSaveConfig()}
-                  disabled={isBusy}
-                  className={`${buttonClass} border-accent bg-accent text-white hover:opacity-90`}
-                >
-                  {savingConfig ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Save className="h-3.5 w-3.5" />}
-                  {savingConfig ? t("settings.ai.savingConfig") : t("settings.ai.saveConfig")}
-                </button>
               </div>
             </div>
 
@@ -561,53 +532,32 @@ export function AiSettingsSection() {
                     {requiresApiKey ? t("settings.ai.apiKeyDesc") : t("settings.ai.apiKeyOptionalDesc")}
                   </p>
                 </div>
-                <span className={`rounded-full px-2 py-0.5 text-[11px] font-medium ${hasApiKey ? "bg-emerald-500/10 text-emerald-600" : "bg-surface-hover text-muted"}`}>
-                  {hasApiKey ? t("settings.ai.apiKeyStored") : t("settings.ai.apiKeyMissing")}
-                </span>
               </div>
 
               <div className="flex flex-wrap items-center gap-2">
                 <div className="relative min-w-[220px] flex-1">
                   <input
-                    ref={apiKeyInputRef}
-                    type="password"
+                    type={showApiKey ? "text" : "password"}
                     autoComplete="new-password"
                     spellCheck={false}
                     disabled={isBusy}
                     aria-label={t("settings.ai.apiKeyInputLabel")}
-                    placeholder={hasApiKey ? t("settings.ai.apiKeyReplacePlaceholder") : t("settings.ai.apiKeyPlaceholder")}
-                    className={`${fieldClass} peer pr-32 font-mono`}
+                    value={apiKey}
+                    onChange={(event) => setApiKey(event.target.value)}
+                    placeholder={t("settings.ai.apiKeyPlaceholder")}
+                    className={`${fieldClass} pr-10 font-mono`}
                   />
-                  {hasApiKey && (
-                    // Show stored status inside the otherwise blank password field,
-                    // but hide it as soon as a replacement key is being entered.
-                    <span
-                      aria-hidden="true"
-                      className="pointer-events-none absolute inset-y-0 right-2 hidden items-center gap-1 text-[11px] font-medium text-emerald-600 peer-placeholder-shown:flex dark:text-emerald-400"
-                    >
-                      <ShieldCheck className="h-3.5 w-3.5" />
-                      {t("settings.ai.apiKeyInputStoredHint")}
-                    </span>
-                  )}
+                  <button
+                    type="button"
+                    onClick={() => setShowApiKey((visible) => !visible)}
+                    disabled={isBusy}
+                    aria-label={t(showApiKey ? "settings.ai.hideApiKey" : "settings.ai.showApiKey")}
+                    title={t(showApiKey ? "settings.ai.hideApiKey" : "settings.ai.showApiKey")}
+                    className="absolute inset-y-0 right-1 inline-flex w-7 items-center justify-center rounded text-muted transition-colors hover:bg-surface-hover hover:text-secondary disabled:cursor-not-allowed"
+                  >
+                    {showApiKey ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
+                  </button>
                 </div>
-                <button
-                  type="button"
-                  onClick={() => void handleSaveApiKey()}
-                  disabled={isBusy}
-                  className={`${buttonClass} border-border-subtle text-tertiary hover:bg-surface-hover`}
-                >
-                  {savingApiKey ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <ShieldCheck className="h-3.5 w-3.5" />}
-                  {savingApiKey ? t("settings.ai.savingApiKey") : t("settings.ai.saveApiKey")}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => void handleDeleteApiKey()}
-                  disabled={isBusy || !hasApiKey}
-                  className={`${buttonClass} border-red-500/25 text-red-500 hover:bg-red-500/5`}
-                >
-                  {deletingApiKey ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Trash2 className="h-3.5 w-3.5" />}
-                  {deletingApiKey ? t("settings.ai.deletingApiKey") : t("settings.ai.deleteApiKey")}
-                </button>
               </div>
               <p className="text-[12px] text-muted">{t("settings.ai.apiKeySecurityHint")}</p>
             </div>
@@ -635,6 +585,15 @@ export function AiSettingsSection() {
                 >
                   {testing === "paid" ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Wifi className="h-3.5 w-3.5" />}
                   {testing === "paid" ? t("settings.ai.testingConnection") : t("settings.ai.testConnection")}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void handleSaveConfig()}
+                  disabled={isBusy}
+                  className={`${buttonClass} ml-auto border-accent bg-accent text-white hover:opacity-90`}
+                >
+                  {savingConfig ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Save className="h-3.5 w-3.5" />}
+                  {savingConfig ? t("settings.ai.savingConfig") : t("settings.ai.saveConfig")}
                 </button>
               </div>
               {requiresApiKey && !hasApiKey && (

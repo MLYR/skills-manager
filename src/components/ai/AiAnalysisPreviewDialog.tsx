@@ -11,19 +11,11 @@ interface Props {
   onConfirm: (previewId: string) => Promise<void>;
 }
 
-/** Cost/privacy confirmation before any billable analysis is enqueued. */
+/** Privacy and token preview before any analysis is enqueued. */
 export function AiAnalysisPreviewDialog({ preview, busy, analysisCounts, onClose, onConfirm }: Props) {
   const { t } = useTranslation();
   const [expanded, setExpanded] = useState(false);
   if (!preview) return null;
-
-  const formatMicros = (micros: number | null) => {
-    if (micros === null) return t("ai.preview.noPrice");
-    if (micros >= 1_000_000) {
-      return `${(micros / 1_000_000).toFixed(3)} ${t("ai.preview.currencyUnit")}`;
-    }
-    return `${micros} ${t("ai.preview.microUnit")}`;
-  };
 
   const handleConfirm = () => {
     void onConfirm(preview.preview_id);
@@ -65,12 +57,7 @@ export function AiAnalysisPreviewDialog({ preview, busy, analysisCounts, onClose
             input: preview.estimated_input_tokens,
             output: preview.estimated_output_tokens,
           })}</p>
-          <p>
-            {t("ai.preview.cost")} {formatMicros(preview.estimated_cost_micros)}
-            {" · "}
-            {t("ai.preview.maxCost")} {formatMicros(preview.estimated_max_retry_cost_micros)}
-          </p>
-          <p className="text-muted">{t("ai.preview.billingNote")}</p>
+          <p className="text-muted">{t("ai.preview.tokenNote")}</p>
           <button
             type="button"
             onClick={() => setExpanded((prev) => !prev)}
