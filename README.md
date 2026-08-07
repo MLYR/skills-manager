@@ -66,6 +66,7 @@
 - **Backup & multi-device sync** — Connect a private GitHub repository with one sign-in (or any Git remote), and the app backs your library up automatically and keeps all connected devices in sync. Merges are skill-aware — a rename on one machine combines cleanly with an edit on another — and true conflicts never block: your local version stays put until you choose keep mine / use remote / keep both. Snapshot versions are restorable at any time.
 - **Activity log & Export Logs** — Install / remove / update / sync operations are recorded locally. Use **Settings → Export Logs** to bundle recent logs and activity history into a single zip for easier issue reports.
 - **Flexible app settings** — Configure repo path, sync mode, theme, text size, language, tray behavior, proxy, Git remote, update checks, and the order agents appear throughout the app — all in one place.
+- **In-app updates** — The app tells you when a new version is out and installs it for you on macOS and Windows. Nothing downloads or installs on its own: checking only notifies, and installing and restarting each take a click.
 
 ## Core Concepts
 
@@ -115,9 +116,11 @@ The Backup page offers three levels: **disconnect this machine** (other devices 
 
 ## Supported Tools
 
-Cursor · Claude Code · Codex · Grok · OpenCode · Amp · Kilo Code · Roo Code · Goose · Gemini CLI · GitHub Copilot · Windsurf · TRAE IDE · Antigravity · Clawdbot · Droid
+52 agents are supported out of the box, including:
 
-You can also add custom tools in **Settings** and manage their skills the same way.
+Claude Code · Codex · Cursor · GitHub Copilot · Gemini CLI · OpenCode · OpenClaw · Hermes Agent · OpenHands · Cline · Goose · Windsurf · Continue · Grok · Antigravity · Qwen Code · Crush · Kilo Code · Roo Code · Amp · Kiro CLI · Droid · TRAE IDE · Warp · Qoder · CodeBuddy
+
+**Settings** lists them all, leading with the ones detected on your machine. You can also add custom tools there and manage their skills the same way.
 
 ## In-App Help
 
@@ -247,22 +250,26 @@ npm run cli:build
 
 ## Troubleshooting
 
-### macOS: Gatekeeper blocks the app on first launch
+### macOS: Gatekeeper blocks the app on first launch (v1.28.5 and earlier)
 
-Skills Manager is ad-hoc signed but not notarized (no paid Apple Developer ID), so macOS Gatekeeper will warn the first time you open it.
+Releases from **v1.29.0** onward are signed with an Apple Developer ID certificate and notarized by Apple, so they open normally — no warning, no Terminal commands. If you are on an older build, upgrading is the fix.
+
+Releases **up to and including v1.28.5** predate notarization, and macOS blocks them:
 
 <p align="center">
   <img src="assets/CleanShot_20260530_093302@2x.png" width="320" alt="macOS Gatekeeper warning: Apple could not verify skills-manager.app is free of malware" />
 </p>
 
-- **"Apple could not verify … is free of malware"** or **"App can't be opened because it is from an unidentified developer"** (releases from v1.20.0 onward) — On macOS 15 (Sequoia) the dialog above only offers **Move to Trash** / **Done**: click **Done**, then open **System Settings → Privacy & Security** and click **Open Anyway** (it appears after the first blocked launch). On older macOS you can instead right-click the app in Finder and choose **Open**, then confirm in the dialog.
-- **"App is damaged and can't be opened"** (releases up to and including v1.19.0) — Run this in Terminal, then open the app again:
+- **"Apple could not verify … is free of malware"** or **"App can't be opened because it is from an unidentified developer"** (v1.20.0 – v1.28.5) — On macOS 15 (Sequoia) the dialog above only offers **Move to Trash** / **Done**: click **Done**, then open **System Settings → Privacy & Security** and click **Open Anyway** (it appears after the first blocked launch). On older macOS you can instead right-click the app in Finder and choose **Open**, then confirm in the dialog.
+- **"App is damaged and can't be opened"** (v1.19.0 and earlier) — Run this in Terminal, then open the app again:
 
   ```bash
   xattr -cr /Applications/skills-manager.app
   ```
 
   Replace the path with wherever you placed the `.app` file if it's not in `/Applications`.
+
+Upgrading to a notarized build changes the app's code signature, so macOS may ask again for permission to read the `skills-manager-git-backup` keychain entry. Click **Always Allow** — the signing identity is stable from v1.29.0 onward, so later updates should not ask again.
 
 ## Star History
 

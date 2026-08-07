@@ -61,6 +61,7 @@
 - **备份与多设备同步** — 一次 GitHub 登录（或任意 Git 远端）接入私有备份仓库，之后自动备份、多台设备自动保持一致。合并以技能为单位——一台改名、另一台改内容会自动组合；真冲突不阻塞不覆盖，本机版本保留待你三选一处理。快照版本随时可恢复。
 - **活动日志 & 导出日志** — 应用会记录本地的安装/移除/更新/同步操作。在 **设置 → 导出日志** 可把最近日志和活动记录打包成压缩文件，方便提交 Issue 时附上。
 - **灵活的应用设置** — 在一个页面里配置仓库路径、同步模式、主题、字号、语言、托盘行为、代理、Git 远程、更新检查，以及 Agent 在全应用中的显示顺序。
+- **应用内更新** — 有新版本时应用会主动提醒，并在 macOS 和 Windows 上直接完成安装。不会自行下载或安装：检查只负责告知，安装和重启各需一次点击。
 
 ## 核心概念
 
@@ -106,9 +107,11 @@
 
 ## 支持的工具
 
-Cursor · Claude Code · Codex · Grok · OpenCode · Amp · Kilo Code · Roo Code · Goose · Gemini CLI · GitHub Copilot · Windsurf · TRAE IDE · Antigravity · Clawdbot · Droid
+开箱支持 52 个 Agent，包括：
 
-你也可以在**设置**中添加自定义工具，以相同方式管理其 Skills。
+Claude Code · Codex · Cursor · GitHub Copilot · Gemini CLI · OpenCode · OpenClaw · Hermes Agent · OpenHands · Cline · Goose · Windsurf · Continue · Grok · Antigravity · Qwen Code · Crush · Kilo Code · Roo Code · Amp · Kiro CLI · Droid · TRAE IDE · Warp · Qoder · CodeBuddy
+
+**设置**页会列出全部，并优先展示在你机器上检测到的那些。你也可以在那里添加自定义工具，以相同方式管理其 Skills。
 
 ## 应用内帮助
 
@@ -205,15 +208,17 @@ npm run cli:build
 
 ## 常见问题
 
-### macOS 首次启动被 Gatekeeper 拦截
+### macOS 首次启动被 Gatekeeper 拦截（v1.28.5 及之前）
 
-Skills Manager 使用 ad-hoc 签名，未做 Apple 公证（没有付费的 Apple Developer ID），所以首次打开会被 macOS Gatekeeper 提示。
+**v1.29.0** 起的版本使用 Apple Developer ID 证书签名并经过 Apple 公证，可以直接打开——不会有提示，也不需要在终端里敲命令。如果你还在用旧版本，升级即可解决。
+
+**v1.28.5 及之前的版本**发布于公证之前，会被 macOS 拦截：
 
 <p align="center">
   <img src="assets/CleanShot_20260530_093302@2x.png" width="320" alt="macOS Gatekeeper 提示：无法验证 skills-manager.app 是否包含恶意软件" />
 </p>
 
-- **"无法验证 App 是否包含恶意软件"** 或 **"无法打开，因为无法验证开发者"**（v1.20.0 及之后版本）—— 在 macOS 15（Sequoia）上，上图的弹窗只有 **移到废纸篓** / **完成** 两个按钮：点 **完成**，再打开 **系统设置 → 隐私与安全性**，点 **仍要打开**（第一次被拦截后会出现）。旧版 macOS 也可以在访达里右键点击应用、选择 **打开**，再在弹窗里确认。
+- **"无法验证 App 是否包含恶意软件"** 或 **"无法打开，因为无法验证开发者"**（v1.20.0 – v1.28.5）—— 在 macOS 15（Sequoia）上，上图的弹窗只有 **移到废纸篓** / **完成** 两个按钮：点 **完成**，再打开 **系统设置 → 隐私与安全性**，点 **仍要打开**（第一次被拦截后会出现）。旧版 macOS 也可以在访达里右键点击应用、选择 **打开**，再在弹窗里确认。
 - **"应用已损坏，无法打开"**（v1.19.0 及之前版本）—— 在终端执行下面这条命令后重新打开应用即可：
 
   ```bash
@@ -221,6 +226,8 @@ Skills Manager 使用 ad-hoc 签名，未做 Apple 公证（没有付费的 Appl
   ```
 
   如果 `.app` 不在 `/Applications`，请替换为实际路径。
+
+升级到公证版本时，应用的代码签名发生了变化，macOS 可能会再问一次是否允许读取 `skills-manager-git-backup` 钥匙串条目。点 **始终允许** 即可——从 v1.29.0 起签名身份保持稳定，之后的更新应该不会再问。
 
 ## Star 增长
 

@@ -49,7 +49,7 @@ export function Sidebar() {
   const { t } = useTranslation();
   const location = useLocation();
   const navigate = useNavigate();
-  const { presets, viewedPreset, setViewedPresetId, refreshPresets, refreshManagedSkills, projects, refreshProjects, tools, managedSkills } = useApp();
+  const { presets, viewedPreset, setViewedPresetId, refreshPresets, refreshManagedSkills, projects, refreshProjects, tools, managedSkills, appUpdate } = useApp();
   const [showCreate, setShowCreate] = useState(false);
   const [showAddProject, setShowAddProject] = useState(false);
   const [renameTarget, setRenameTarget] = useState<{ id: string; name: string; icon?: string | null } | null>(null);
@@ -723,6 +723,14 @@ export function Sidebar() {
               )}
             />
             {t("sidebar.settings")}
+            {/* A newer app version exists. Amber = "有更新" per the UI spec;
+                the dot only points at Settings, where the user decides. */}
+            {appUpdate?.has_update && (
+              <span
+                className="ml-auto h-1.5 w-1.5 shrink-0 rounded-full bg-amber-400"
+                title={t("settings.updateAvailable", { version: appUpdate.latest_version })}
+              />
+            )}
           </Link>
         </div>
       </div>

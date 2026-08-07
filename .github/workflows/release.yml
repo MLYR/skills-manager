@@ -30,6 +30,11 @@ jobs:
 
     runs-on: ${{ matrix.platform }}
     name: Build (${{ matrix.label }})
+    # Apple's notary service can leave a submission "In Progress" indefinitely and
+    # `notarytool submit --wait` has no timeout of its own, so v1.29.0 burned the
+    # full 6-hour GitHub limit on both macOS legs. The slowest healthy build so far
+    # is Windows at ~17 minutes, so an hour caps a hang while leaving real headroom.
+    timeout-minutes: 60
 
     steps:
       - name: Checkout repository
@@ -136,37 +141,143 @@ jobs:
             echo "EOF"
           } >> "$GITHUB_OUTPUT"
 
+      # A missing secret must break the build loudly: tauri-action would otherwise
+      # fall back to a linker-only signature that has no sealed resources and fails
+      # `codesign --verify` (issue #138). The notarization key is delivered as
+      # base64 because Tauri wants a path to the .p8, not its contents.
+      - name: Prepare macOS signing credentials
+        if: startsWith(matrix.platform, 'macos')
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_BASE64: ${{ secrets.APPLE_API_KEY_BASE64 }}
+        run: |
+          set -euo pipefail
+          fail=0
+          for name in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY \
+                      APPLE_API_ISSUER APPLE_API_KEY APPLE_API_KEY_BASE64; do
+            value=${!name:-}
+            if [ -z "$value" ]; then
+              echo "Missing repository secret: $name" >&2
+              fail=1
+            fi
+          done
+          if [ "$fail" -ne 0 ]; then
+            echo "macOS releases require Developer ID signing + notarization credentials." >&2
+            exit 1
+          fi
+          KEY_DIR="$RUNNER_TEMP/private_keys"
+          KEY_PATH="$KEY_DIR/AuthKey_${APPLE_API_KEY}.p8"
+          mkdir -p "$KEY_DIR"
+          printf '%s' "$APPLE_API_KEY_BASE64" | base64 --decode > "$KEY_PATH"
+          chmod 600 "$KEY_PATH"
+          if ! grep -q 'BEGIN PRIVATE KEY' "$KEY_PATH"; then
+            echo "APPLE_API_KEY_BASE64 did not decode to a PEM private key" >&2
+            exit 1
+          fi
+          echo "APPLE_API_KEY_PATH=$KEY_PATH" >> "$GITHUB_ENV"
+
       - name: Build with Tauri
         uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5 # v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-          # Ad-hoc sign macOS bundles so Gatekeeper reports "unverified developer"
-          # (dismissable via right-click → Open) instead of "app is damaged".
-          # Without this, the linker-only signature has no sealed resources and
-          # `codesign --verify` fails. See issue #138.
-          APPLE_SIGNING_IDENTITY: ${{ startsWith(matrix.platform, 'macos') && '-' || '' }}
+          # Sign macOS bundles with the Developer ID Application certificate and
+          # notarize them with Apple, so a downloaded build opens without any
+          # Gatekeeper prompt. Signing alone is not enough: macOS 10.15+ blocks
+          # quarantined apps that carry no notarization ticket.
+          # APPLE_API_KEY_PATH comes from the previous step via $GITHUB_ENV, and is
+          # only set on macOS runners.
+          APPLE_CERTIFICATE: ${{ startsWith(matrix.platform, 'macos') && secrets.APPLE_CERTIFICATE || '' }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ startsWith(matrix.platform, 'macos') && secrets.APPLE_CERTIFICATE_PASSWORD || '' }}
+          APPLE_SIGNING_IDENTITY: ${{ startsWith(matrix.platform, 'macos') && secrets.APPLE_SIGNING_IDENTITY || '' }}
+          APPLE_API_ISSUER: ${{ startsWith(matrix.platform, 'macos') && secrets.APPLE_API_ISSUER || '' }}
+          APPLE_API_KEY: ${{ startsWith(matrix.platform, 'macos') && secrets.APPLE_API_KEY || '' }}
         with:
           tagName: v__VERSION__
           releaseName: 'Skills Manager v__VERSION__'
           releaseBody: ${{ steps.changelog.outputs.body }}
-          releaseDraft: false
+          # Publish only after every platform is verified. v1.29.0 shipped with
+          # Windows and Linux assets while both macOS legs were still notarizing,
+          # because assets go public the moment each leg finishes. tauri-action
+          # looks a draft up by listing releases, so concurrent matrix legs still
+          # converge on one draft rather than creating four.
+          releaseDraft: true
           prerelease: false
           updaterJsonKeepUniversal: true
           args: --target ${{ matrix.target }}
 
-      - name: Verify macOS bundle signature
+      - name: Verify macOS signature and notarization
         if: startsWith(matrix.platform, 'macos')
         run: |
           set -euo pipefail
-          APP_PATH="src-tauri/target/${{ matrix.target }}/release/bundle/macos/skills-manager.app"
-          if [ ! -d "$APP_PATH" ]; then
-            echo "Expected app bundle not found at $APP_PATH" >&2
+          verify_bundle() {
+            local label="$1" app="$2"
+            echo "=== Verifying $label: $app ==="
+            if [ ! -d "$app" ]; then
+              echo "Expected app bundle not found at $app" >&2
+              return 1
+            fi
+            codesign --verify --deep --strict --verbose=2 "$app"
+            # Capture once and match against the string: piping into `grep -q` lets
+            # grep exit first, and the SIGPIPE it sends codesign would surface as a
+            # spurious pipeline failure under `set -o pipefail`.
+            local sig_info
+            sig_info="$(codesign -dvvv "$app" 2>&1)"
+            grep -E 'Authority|Signature|Sealed Resources|Identifier|Timestamp' <<<"$sig_info"
+            # An unexpected fallback identity still yields a structurally valid
+            # signature, so assert the one Gatekeeper actually accepts.
+            grep -q 'Authority=Developer ID Application:' <<<"$sig_info" || {
+              echo "$label is not signed with a Developer ID Application certificate" >&2
+              return 1
+            }
+            # Notarization is rejected without the hardened runtime, so assert the flag
+            # rather than discovering it from a failed submission log.
+            grep -qE 'flags=[^)]*runtime' <<<"$sig_info" || {
+              echo "Hardened runtime is not enabled on $label" >&2
+              return 1
+            }
+            # The stapled ticket is what lets Gatekeeper approve a downloaded copy
+            # offline; spctl is the same check macOS performs on first launch.
+            xcrun stapler validate "$app"
+            spctl --assess --type execute --verbose=4 "$app"
+          }
+
+          BUNDLE_DIR="src-tauri/target/${{ matrix.target }}/release/bundle/macos"
+          verify_bundle "built bundle" "$BUNDLE_DIR/skills-manager.app"
+
+          # The .app.tar.gz — not the .app or the .dmg — is what the in-app
+          # updater downloads and unpacks over the running install, so it is the
+          # artifact whose signature and stapled ticket actually decide whether
+          # an updated copy still launches. Verifying only the build directory
+          # would not catch an archive that lost either one.
+          TAR_PATH="$(find "$BUNDLE_DIR" -maxdepth 1 -name '*.app.tar.gz' | head -1)"
+          if [ -z "$TAR_PATH" ]; then
+            echo "No updater archive (*.app.tar.gz) was produced" >&2
             exit 1
           fi
-          codesign --verify --deep --strict --verbose=2 "$APP_PATH"
-          codesign -dvvv "$APP_PATH" 2>&1 | grep -E 'Signature|Sealed Resources|Identifier'
+          EXTRACT_DIR="$(mktemp -d)"
+          tar -xzf "$TAR_PATH" -C "$EXTRACT_DIR"
+          EXTRACTED_APP="$(find "$EXTRACT_DIR" -maxdepth 1 -name '*.app' | head -1)"
+          if [ -z "$EXTRACTED_APP" ]; then
+            echo "No .app found inside $TAR_PATH" >&2
+            exit 1
+          fi
+          verify_bundle "updater archive ($(basename "$TAR_PATH"))" "$EXTRACTED_APP"
+          rm -rf "$EXTRACT_DIR"
+
+          # `|| true`: with pipefail a missing dmg directory would abort the step
+          # with a bare exit 1 and no diagnostic.
+          DMG_DIR="src-tauri/target/${{ matrix.target }}/release/bundle/dmg"
+          DMG_PATH="$(find "$DMG_DIR" -maxdepth 1 -name '*.dmg' 2>/dev/null | head -1 || true)"
+          if [ -n "$DMG_PATH" ]; then
+            echo "Checking $DMG_PATH (informational: the .app inside carries its own ticket)"
+            xcrun stapler validate "$DMG_PATH" || echo "Note: .dmg itself is not stapled"
+          fi
 
   verify-updater-assets:
     needs: build
@@ -177,40 +288,87 @@ jobs:
       - name: Validate updater metadata and signatures
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
         run: |
           set -euo pipefail
 
-          api_url="https://api.github.com/repos/${{ github.repository }}/releases/tags/${{ github.ref_name }}"
-          release_json=$(curl -fsSL \
+          # The release is still a draft at this point, and /releases/tags/{tag}
+          # returns 404 for drafts, so it has to be located by listing.
+          releases_json=$(curl -fsSL \
             -H "Authorization: Bearer ${GITHUB_TOKEN}" \
             -H "Accept: application/vnd.github+json" \
-            "$api_url")
+            "https://api.github.com/repos/${REPO}/releases?per_page=100")
+
+          release_json=$(echo "$releases_json" | jq --arg t "$TAG" '.[] | select(.tag_name == $t)')
+          if [ -z "$release_json" ]; then
+            echo "No release found for tag ${TAG}" >&2
+            exit 1
+          fi
 
           asset_names=$(echo "$release_json" | jq -r '.assets[]?.name')
+          echo "Assets on the draft release:"
+          echo "$asset_names" | sed 's/^/  /'
 
           if ! echo "$asset_names" | grep -qx 'latest.json'; then
-            echo "Missing updater metadata asset: latest.json"
+            echo "Missing updater metadata asset: latest.json" >&2
             exit 1
           fi
 
           if ! echo "$asset_names" | grep -q '\.sig'; then
-            echo "Missing updater signature assets (*.sig)"
+            echo "Missing updater signature assets (*.sig)" >&2
             exit 1
           fi
 
-          latest_url="https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/latest.json"
-          curl -fsSL "$latest_url" >/tmp/latest.json
+          # Draft assets are not served from the public download host, so fetch
+          # latest.json through the authenticated asset endpoint.
+          asset_id=$(echo "$release_json" | jq -r '.assets[] | select(.name == "latest.json") | .id')
+          curl -fsSL \
+            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+            -H "Accept: application/octet-stream" \
+            "https://api.github.com/repos/${REPO}/releases/assets/${asset_id}" -o /tmp/latest.json
 
-          if ! jq -e 'has("platforms") and (.platforms | has("windows-x86_64"))' /tmp/latest.json >/dev/null; then
-            echo "latest.json does not include windows-x86_64 updater entry"
-            cat /tmp/latest.json
-            exit 1
-          fi
+          # v1.29.0 published with no darwin entries at all because only Windows
+          # and Linux were asserted here, so every shipped platform is checked now.
+          fail=0
+          for platform in darwin-aarch64 darwin-x86_64 windows-x86_64 linux-x86_64; do
+            if ! jq -e --arg p "$platform" '.platforms[$p].signature and .platforms[$p].url' /tmp/latest.json >/dev/null; then
+              echo "latest.json is missing a signed updater entry for ${platform}" >&2
+              fail=1
+            fi
+          done
 
-          if ! jq -e '.platforms["windows-x86_64"].signature and .platforms["windows-x86_64"].url' /tmp/latest.json >/dev/null; then
-            echo "windows-x86_64 updater entry is missing signature/url"
-            cat /tmp/latest.json
+          # A macOS leg that dies during notarization still leaves the release
+          # looking plausible, so require its user-facing artifacts too.
+          for pattern in '\.dmg$' '\.app\.tar\.gz$'; do
+            if ! echo "$asset_names" | grep -qE "$pattern"; then
+              echo "Missing macOS asset matching ${pattern}" >&2
+              fail=1
+            fi
+          done
+
+          if [ "$fail" -ne 0 ]; then
+            echo "--- latest.json ---" >&2
+            cat /tmp/latest.json >&2
             exit 1
           fi
 
           echo "Updater assets validation passed"
+
+  publish-release:
+    needs: [build, verify-updater-assets]
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    name: Publish release
+    steps:
+      # Every platform built, signed, notarized and verified by this point, so
+      # this is the step that actually makes the release visible to users.
+      - name: Publish the verified draft
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          gh release edit "${{ github.ref_name }}" \
+            --repo "${{ github.repository }}" \
+            --draft=false
+          echo "Published ${{ github.ref_name }}"

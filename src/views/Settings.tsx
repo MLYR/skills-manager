@@ -61,10 +61,10 @@ import { ToggleSwitch } from "../components/ToggleSwitch";
 import * as api from "../lib/tauri";
 import { applyTextSize } from "../lib/textScale";
 import { getErrorMessage } from "../lib/error";
-import type { AppUpdateInfo } from "../lib/tauri";
 import type { Theme } from "../hooks/useTheme";
 
 const IS_WINDOWS = navigator.userAgent.includes("Windows");
+const IS_MACOS = navigator.userAgent.includes("Mac");
 
 const SETTINGS_SECTION_IDS = [
   "agents",
@@ -77,6 +77,13 @@ const SETTINGS_SECTION_IDS = [
 ] as const;
 
 type SettingsSectionId = (typeof SETTINGS_SECTION_IDS)[number];
+/** 支持原地替换运行中应用的更新产物的平台。
+ *
+ * Linux 故意不包含在内：只有 AppImage 可以原地更新，应用无法安全区分它和
+ * .deb/.rpm 安装包，因此 Linux 用户继续使用下载入口，避免出现必然失败的安装按钮。 */
+const CAN_INSTALL_IN_APP = IS_WINDOWS || IS_MACOS;
+
+const RESTART_TOAST_ID = "app-update-restart";
 
 function compactHomePath(path: string) {
   return path
@@ -161,7 +168,7 @@ function AgentGroupDnd({ items, sensors, dragLabel, onDragEnd, renderAgentCard }
 export function Settings() {
   const { t, i18n } = useTranslation();
   const navigate = useNavigate();
-  const { tools, refreshTools, openHelp } = useApp();
+  const { tools, refreshTools, openHelp, appUpdate, refreshAppUpdate } = useApp();
   const [togglingTools, setTogglingTools] = useState<Set<string>>(new Set());
   const { theme, setTheme } = useThemeContext();
   const [syncMode, setSyncMode] = useState("symlink");
@@ -180,7 +187,6 @@ export function Settings() {
   const [centralRepoPathInput, setCentralRepoPathInput] = useState("");
   const [savingCentralRepoPath, setSavingCentralRepoPath] = useState(false);
   const [checkingUpdate, setCheckingUpdate] = useState(false);
-  const [updateInfo, setUpdateInfo] = useState<AppUpdateInfo | null>(null);
   const [installing, setInstalling] = useState(false);
   const [gitRemoteInput, setGitRemoteInput] = useState("");
   const [gitRemoteSaving, setGitRemoteSaving] = useState(false);
@@ -687,10 +693,8 @@ export function Settings() {
 
   const handleCheckUpdate = async () => {
     setCheckingUpdate(true);
-    setUpdateInfo(null);
     try {
-      const info = await api.checkAppUpdate();
-      setUpdateInfo(info);
+      const info = await refreshAppUpdate();
       if (info.has_update) {
         toast.info(t("settings.updateAvailable", { version: info.latest_version }));
       } else {
@@ -706,18 +710,46 @@ export function Settings() {
   const handleAutoUpdate = async () => {
     setInstalling(true);
     try {
-      const update = await checkUpdater();
-      if (update) {
-        toast.info(t("settings.installing"));
-        await update.downloadAndInstall();
-        toast.success(t("settings.restartToApply"));
-      } else {
-        toast.success(t("settings.noUpdate"));
+      // Read-only image or Gatekeeper-translocated copy: the updater would
+      // download the whole bundle and only then fail to swap it, so stop first
+      // and say what to do instead.
+      const blocker = await api.updateInstallBlocker();
+      if (blocker) {
+        toast.error(t("settings.updateRelocate"));
+        return;
       }
-    } catch {
+      // The updater plugin does not inherit the app's proxy setting the way
+      // `check_app_update` does. Without this, a user behind a proxy is told a
+      // new version exists and then cannot install it. The proxy given to
+      // check() is carried through to the download.
+      const proxy = (await api.getSettings("proxy_url")) || undefined;
+      const update = await checkUpdater(proxy ? { proxy } : undefined);
+      if (!update) {
+        toast.success(t("settings.noUpdate"));
+        return;
+      }
+      toast.info(t("settings.installing"));
+      await update.downloadAndInstall();
+      // Installing was the user's choice; restarting is a second one. Offered
+      // as a toast action rather than a modal so a stray keypress cannot end
+      // the session mid-task, and it stays up until acted on.
+      toast.success(t("settings.restartToApply"), {
+        id: RESTART_TOAST_ID,
+        duration: Infinity,
+        action: {
+          label: t("settings.restartNow"),
+          onClick: () => {
+            api.restartApp().catch((err) => {
+              toast.error(getErrorMessage(err, t("common.error")));
+            });
+          },
+        },
+      });
+    } catch (err) {
+      console.error("In-app update failed:", err);
       toast.error(t("settings.updateError"));
-      if (updateInfo?.release_url) {
-        await openUrl(updateInfo.release_url);
+      if (appUpdate?.release_url) {
+        await openUrl(appUpdate.release_url);
       }
     } finally {
       setInstalling(false);
@@ -799,12 +831,12 @@ export function Settings() {
   ] as const;
   const customTools = useMemo(() => tools.filter((tool) => tool.is_custom), [tools]);
   const builtInTools = useMemo(() => tools.filter((tool) => !tool.is_custom), [tools]);
-  // 已安装的内建 Agent 优先展示，未安装项默认收进“更多 Agent”，避免顶部被未使用的 Agent 占满。
-  const activeBuiltInTools = useMemo(
+  // 按本机实际检测结果分组，避免依赖容易过时的手工“主流”列表；两组均保留后端优先级和用户拖拽后的排序。
+  const detectedTools = useMemo(
     () => builtInTools.filter((tool) => tool.installed),
     [builtInTools]
   );
-  const moreBuiltInTools = useMemo(
+  const undetectedTools = useMemo(
     () => builtInTools.filter((tool) => !tool.installed),
     [builtInTools]
   );
@@ -1213,21 +1245,23 @@ export function Settings() {
           )}
 
           <div className="space-y-4">
-            <div>
-              <div className="mb-2 flex items-center justify-between gap-2">
-                <h3 className="text-[13px] font-medium text-secondary">{t("settings.builtInAgents")}</h3>
-                <span className="text-[12px] text-muted">{activeBuiltInTools.length}</span>
+            {detectedTools.length > 0 && (
+              <div>
+                <div className="mb-2 flex items-center justify-between gap-2">
+                  <h3 className="text-[13px] font-medium text-secondary">{t("settings.detectedAgentsSection")}</h3>
+                  <span className="text-[12px] text-muted tabular-nums">{detectedTools.length}</span>
+                </div>
+                <AgentGroupDnd
+                  items={detectedTools}
+                  sensors={dragSensors}
+                  dragLabel={t("settings.dragToReorder")}
+                  onDragEnd={handleAgentDragEnd}
+                  renderAgentCard={renderAgentCard}
+                />
               </div>
-              <AgentGroupDnd
-                items={activeBuiltInTools}
-                sensors={dragSensors}
-                dragLabel={t("settings.dragToReorder")}
-                onDragEnd={handleAgentDragEnd}
-                renderAgentCard={renderAgentCard}
-              />
-            </div>
+            )}
 
-            {moreBuiltInTools.length > 0 && (
+            {undetectedTools.length > 0 && (
               <div>
                 <button
                   type="button"
@@ -1235,11 +1269,11 @@ export function Settings() {
                   className="mb-2 inline-flex items-center gap-1.5 text-[13px] font-medium text-muted transition-colors hover:text-secondary outline-none"
                 >
                   {showMoreAgents ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
-                  {t("settings.moreAgentsSection", { count: moreBuiltInTools.length })}
+                  {t("settings.otherAgentsSection", { count: undetectedTools.length })}
                 </button>
                 {showMoreAgents && (
                   <AgentGroupDnd
-                    items={moreBuiltInTools}
+                    items={undetectedTools}
                     sensors={dragSensors}
                     dragLabel={t("settings.dragToReorder")}
                     onDragEnd={handleAgentDragEnd}
@@ -1802,17 +1836,17 @@ export function Settings() {
                 <h3 className="text-[13px] font-semibold text-primary">{t("settings.version")}</h3>
                 <p className="text-muted text-[13px]">
                   {t("settings.tagline")}
-                  {updateInfo?.has_update && (
+                  {appUpdate?.has_update && (
                     <span className="ml-2 text-amber-500 font-medium">
-                      {t("settings.updateAvailable", { version: updateInfo.latest_version })}
+                      {t("settings.updateAvailable", { version: appUpdate.latest_version })}
                     </span>
                   )}
                 </p>
               </div>
             </div>
             <div className="flex flex-wrap gap-2">
-              {updateInfo?.has_update ? (
-                IS_WINDOWS ? (
+              {appUpdate?.has_update ? (
+                CAN_INSTALL_IN_APP ? (
                   <>
                     <button
                       type="button"
@@ -1829,7 +1863,7 @@ export function Settings() {
                     </button>
                     <button
                       type="button"
-                      onClick={() => { openUrl(updateInfo.release_url).catch(() => {}); }}
+                      onClick={() => { openUrl(appUpdate.release_url).catch(() => {}); }}
                       className={`${actionButtonClass} bg-surface-hover hover:bg-surface-active text-tertiary border-border`}
                     >
                       <ExternalLink className="w-3 h-3" /> {t("settings.download")}
@@ -1838,7 +1872,7 @@ export function Settings() {
                 ) : (
                   <button
                     type="button"
-                    onClick={() => { openUrl(updateInfo.release_url).catch(() => {}); }}
+                    onClick={() => { openUrl(appUpdate.release_url).catch(() => {}); }}
                     className={`${actionButtonClass} bg-accent text-white border-accent hover:opacity-90`}
                   >
                     <Download className="w-3 h-3" /> {t("settings.download")}

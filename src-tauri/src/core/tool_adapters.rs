@@ -635,16 +635,22 @@ pub fn default_tool_adapters() -> Vec<ToolAdapter> {
             project_relative_skills_dir: None,
         },
         ToolAdapter {
+            // Pi loads user-level skills from `~/.pi/agent/skills/` (note the
+            // `agent` segment) and project-level skills from `<repo>/.pi/skills/`
+            // (no `agent` segment) — the same split as its oh-my-pi fork above.
+            // `~/.agents/skills` is a second user-level root Pi reads, kept here
+            // as a discovery fallback so skills deployed there for Codex/Copilot
+            // still surface in the Pi tab. See pi-coding-agent `docs/skills.md`.
             key: "pi".into(),
             display_name: "Pi".into(),
             relative_skills_dir: ".pi/agent/skills".into(),
             relative_detect_dir: ".pi/agent".into(),
-            additional_scan_dirs: vec![],
+            additional_scan_dirs: vec![".agents/skills".into()],
             override_skills_dir: None,
             category: ToolCategory::Coding,
             is_custom: false,
             recursive_scan: false,
-            project_relative_skills_dir: None,
+            project_relative_skills_dir: Some(".pi/skills".into()),
         },
         ToolAdapter {
             key: "pochi".into(),
@@ -767,9 +773,15 @@ pub fn default_tool_adapters() -> Vec<ToolAdapter> {
             project_relative_skills_dir: None,
         },
         ToolAdapter {
+            // WorkBuddy's user skill directory is `~/.workbuddy/skills/` — that
+            // is where its own skill import unpacks to and what it scans as
+            // `source='user'`. `~/.workbuddy/skills-marketplace/` is a different
+            // thing: a vendor cache that `BuiltinSkillMarketplaceUpdater` wipes
+            // and re-extracts wholesale on every marketplace version bump, so
+            // anything deployed under it is destroyed on the next update.
             key: "workbuddy".into(),
             display_name: "WorkBuddy".into(),
-            relative_skills_dir: ".workbuddy/skills-marketplace/skills".into(),
+            relative_skills_dir: ".workbuddy/skills".into(),
             relative_detect_dir: ".workbuddy".into(),
             additional_scan_dirs: vec![],
             override_skills_dir: None,

@@ -674,6 +674,64 @@ pub async fn app_exit(app: tauri::AppHandle) {
     }
 }
 
+/// Relaunch the app so a freshly installed update takes effect. Only ever
+/// invoked from an explicit user confirmation — the updater never restarts on
+/// its own.
+///
+/// Scheduled onto the main thread for the same reason `app_exit` is: the
+/// teardown destroys the main window before the process goes away.
+#[tauri::command]
+pub async fn restart_app(app: tauri::AppHandle) {
+    let app_for_main = app.clone();
+    if let Err(err) = app.run_on_main_thread(move || crate::restart_app(&app_for_main)) {
+        log::error!("Failed to schedule restart_app on main thread: {err}");
+        crate::restart_app(&app);
+    }
+}
+
+/// Report why an in-app update cannot be installed from where the app is
+/// running right now, or `None` to let the updater proceed.
+///
+/// Deliberately narrow. A general "is the bundle's parent writable" test would
+/// be wrong: a `/Applications` copy owned by a different admin account is not
+/// writable by this process either, and there the updater's own privileged
+/// prompt succeeds. Only the two states below are beyond its reach, because it
+/// replaces the `.app` in place.
+#[tauri::command]
+pub async fn update_install_blocker() -> Result<Option<String>, AppError> {
+    // macOS-specific: elsewhere the updater runs an installer from a temp
+    // directory instead of swapping the running bundle.
+    if !cfg!(target_os = "macos") {
+        return Ok(None);
+    }
+    tauri::async_runtime::spawn_blocking(|| {
+        let exe = std::env::current_exe().map_err(|e| AppError::io(e.to_string()))?;
+        // Gatekeeper runs a quarantined copy from a randomized read-only mount
+        // that is discarded on quit, so an update written there would vanish
+        // rather than apply.
+        if exe.components().any(|c| c.as_os_str() == "AppTranslocation") {
+            return Ok(Some("relocate".to_string()));
+        }
+        // …/Foo.app/Contents/MacOS/foo — the updater swaps the bundle inside
+        // its parent directory, so that is what has to accept a write.
+        let Some(parent) = exe.ancestors().nth(4) else {
+            return Ok(None);
+        };
+        match tempfile::Builder::new()
+            .prefix(".skills-manager-update-probe")
+            .tempfile_in(parent)
+        {
+            Ok(_) => Ok(None),
+            // EROFS: still running from a mounted .dmg or another read-only
+            // image, which no amount of privilege makes writable.
+            Err(e) if e.raw_os_error() == Some(30) => Ok(Some("relocate".to_string())),
+            // EACCES and friends: the updater escalates on its own, so let it.
+            Err(_) => Ok(None),
+        }
+    })
+    .await?
+}
+
 #[tauri::command]
 pub async fn hide_to_tray(
     app: tauri::AppHandle,

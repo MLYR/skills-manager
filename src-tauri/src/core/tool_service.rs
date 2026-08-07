@@ -30,16 +30,53 @@ pub fn get_disabled_tools(store: &SkillStore) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// Default ordering for the agent list, roughly most- to least-known.
+///
+/// The settings page groups agents by whether they were detected on this
+/// machine, so this order is what a user sees while scanning the *undetected*
+/// list looking for something to install — which makes "how likely is this to
+/// be the one they mean" the only useful sort key.
+///
+/// Ranked 2026-08-07 from GitHub stars for the open-source agents (openclaw
+/// 385k, hermes 227k, opencode 194k, claude-code 141k, gemini-cli 106k, codex
+/// 104k, openhands 83k, cline 66k, goose 52k, continue 35k, then a 24–27k
+/// cluster: deepagents, crush, qwen-code, kilocode, roo-code) and from market
+/// position for the closed-source ones (Copilot ~42% share / 20M+ users,
+/// Cursor $2B ARR / 1M+ paying seats, Windsurf the third major editor).
+///
+/// The two units are not directly comparable, so the head blends them rather
+/// than pretending stars rank a product with no public repo. Stars also
+/// overstate the general-purpose assistants — openclaw and hermes draw
+/// stargazers far beyond the people who code with them daily — so they sit
+/// below the agents this app most often syncs skills to, not at the very top
+/// their raw counts would buy.
+///
+/// Agents past the end of this list fall through in adapter-registration
+/// order. Re-measure before editing; do not reorder on impressions.
 const DEFAULT_PRIORITY_ORDER: &[&str] = &[
     "claude_code",
     "codex",
-    "grok",
-    "gemini_cli",
     "cursor",
+    "github_copilot",
+    "gemini_cli",
     "opencode",
-    "omp_agent",
-    "hermes",
     "openclaw",
+    "hermes",
+    "openhands",
+    "cline",
+    "goose",
+    "windsurf",
+    "continue",
+    "grok",
+    "antigravity",
+    "qwen_code",
+    "crush",
+    "kilo_code",
+    "roo_code",
+    "deepagents",
+    "amp",
+    "kiro",
+    "omp_agent",
 ];
 
 pub fn get_tool_order(store: &SkillStore) -> Vec<String> {
@@ -402,29 +439,43 @@ mod tests {
         // Priority list comes first, then remaining adapters in their natural order.
         assert_eq!(order[0], "claude_code");
         assert_eq!(order[1], "codex");
-        assert_eq!(order[2], "grok");
-        // omp_agent sits after the mainstream coding agents, not near the top.
+        assert_eq!(order[2], "cursor");
+        // omp_agent is last in the priority list, so it sits behind every other
+        // ranked agent rather than near the top.
         let opencode = order.iter().position(|k| k == "opencode").unwrap();
-        assert_eq!(order[opencode + 1], "omp_agent");
+        let omp = order.iter().position(|k| k == "omp_agent").unwrap();
+        assert!(omp > opencode);
+    }
+
+    #[test]
+    fn unranked_agents_follow_the_ranked_ones() {
+        // `pochi` is not in DEFAULT_PRIORITY_ORDER, so it falls through to the
+        // tail even though the adapter list happens to mention it first.
+        let all = v(&["pochi", "claude_code", "cline"]);
+        let order = merge_order(&[], &all);
+        assert_eq!(order, v(&["claude_code", "cline", "pochi"]));
     }
 
     #[test]
     fn new_priority_agent_slots_after_its_predecessor() {
-        // Existing user whose saved order predates `grok`.
-        let saved = v(&["claude_code", "codex", "gemini_cli", "cursor", "opencode"]);
-        let all = v(&["cursor", "claude_code", "codex", "grok", "gemini_cli", "opencode"]);
+        // Existing user whose saved order predates `cursor`, the agent ranked
+        // immediately after `codex`.
+        let saved = v(&["claude_code", "codex", "gemini_cli", "opencode"]);
+        let all = v(&["claude_code", "codex", "cursor", "gemini_cli", "opencode"]);
         let order = merge_order(&saved, &all);
         let codex = order.iter().position(|k| k == "codex").unwrap();
-        assert_eq!(order[codex + 1], "grok", "grok must land right after codex");
+        assert_eq!(order[codex + 1], "cursor", "cursor must land right after codex");
         // Existing entries keep their relative order.
         assert!(
             order.iter().position(|k| k == "gemini_cli").unwrap()
-                > order.iter().position(|k| k == "grok").unwrap()
+                < order.iter().position(|k| k == "opencode").unwrap()
         );
     }
 
     #[test]
-    fn new_omp_agent_slots_after_mainstream_agents_for_existing_users() {
+    fn new_agent_anchors_to_its_ranked_predecessor_within_the_saved_order() {
+        // A saved order the user has rearranged, so the ranked predecessor sits
+        // somewhere other than where DEFAULT_PRIORITY_ORDER would put it.
         let saved = v(&["claude_code", "codex", "grok", "gemini_cli", "cursor", "opencode"]);
         let all = v(&[
             "cursor",
@@ -436,12 +487,16 @@ mod tests {
             "opencode",
         ]);
         let order = merge_order(&saved, &all);
-        let opencode = order.iter().position(|k| k == "opencode").unwrap();
+        let grok = order.iter().position(|k| k == "grok").unwrap();
         let omp_agent = order.iter().position(|k| k == "omp_agent").unwrap();
         let claude_code = order.iter().position(|k| k == "claude_code").unwrap();
-        // omp_agent slots right after opencode (its predecessor in the priority
-        // list), i.e. below the mainstream coding agents — not right after claude_code.
-        assert_eq!(order[opencode + 1], "omp_agent");
+        // omp_agent is last in DEFAULT_PRIORITY_ORDER, so its anchor is grok —
+        // the last ranked agent ahead of it that this user has — and it lands
+        // wherever *the user* put grok. That is deliberately not "after every
+        // mainstream agent": gemini_cli, cursor and opencode follow grok in
+        // this saved order, so omp_agent precedes them. The guarantee under
+        // test is the anchoring, not an absolute position.
+        assert_eq!(order[grok + 1], "omp_agent");
         assert!(
             omp_agent > claude_code + 1,
             "omp_agent must not sit right after claude_code"

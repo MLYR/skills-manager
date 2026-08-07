@@ -5,6 +5,51 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.30.0] - 2026-08-07
+
+### Release Overview
+- macOS can now install updates from inside the app, and every platform tells you when a new version exists. Updating stays a decision you make: nothing is ever downloaded or installed on its own.
+- The agent list in Settings leads with the agents actually found on your machine instead of a hand-kept "mainstream" list.
+
+### User-facing
+- **In-app updates on macOS** — When an update is available, Settings offers **Install Update** instead of only a link to GitHub. This became possible once builds were signed with a Developer ID certificate and notarized, because the replacement bundle now carries a signature macOS keeps trusting. The **Download** link stays alongside it for anyone who prefers installing by hand. Linux still links to the release page: only the AppImage can be replaced in place, and a .deb or .rpm install is indistinguishable from it here.
+- **This change first pays off when updating _from_ this release** — Which buttons the update section shows is part of the app you already have installed, so v1.29.0 still sends macOS users to GitHub for this one upgrade. From this release onward, macOS updates happen in place.
+- **A new version now announces itself** — The app checks for a newer version shortly after launch and, if one exists, shows a notification and marks Settings in the sidebar. It only tells you; downloading and installing still require your click. There is no automatic app update, and none is planned. (The separate *Skill* Auto-Update setting is unchanged and still governs skills only.)
+- **Restarting after an update is your call** — Once an update is installed, a notification offers **Restart Now** and waits. Nothing restarts on its own, so an update can never interrupt what you were doing.
+- **Updates work behind a proxy** — The installer now uses the proxy configured in Settings. Previously the version *check* honoured that proxy while the *download* did not, so anyone reaching GitHub through one was told a new version existed and then could not install it.
+- **A clear message instead of a failed update** — Updating from inside a mounted .dmg, or from a copy macOS is running in its quarantine sandbox, cannot work: the replaced app is written somewhere that gets discarded. The app now detects this and asks you to move it to Applications first, rather than downloading the update and failing at the end.
+- **The agent list groups by what you actually have** — Settings used to split agents into "Built-in" and "More Agents" by a hand-kept list, which had drifted: Pi and WorkBuddy sat up top while OpenHands, Cline, Goose and Continue — each far more widely used — were folded away. The split is now **Detected Agents** (found on this machine) and **Other Supported Agents**, so the top of the list is the agents you can actually sync to, and it stays accurate on its own as you install or remove them.
+- **The rest of the list is ordered by how widely used each agent is** — The collapsed section reads as a "what else could I install" list, so it is ranked rather than arbitrary. Your own drag-and-drop ordering still wins wherever you have set one.
+
+### Developer & Governance
+- `restart_app` and `quit_app` share `teardown_before_exit`, so the exit-time local backup commit cannot be skipped by restarting instead of quitting — restarting outright would have silently dropped it.
+- Restart goes through `AppHandle::request_restart` rather than `restart`. On the main thread the latter spawns the replacement process and exits without emitting `RunEvent::Exit`, and `tauri-plugin-single-instance` removes its socket only on that event. The old process normally exits before the new one can connect, but nothing enforces that ordering, and losing the race means the new instance sees a live singleton and exits — taking the app down instead of restarting it.
+- `update_install_blocker` reports only the two states the updater cannot recover from: a Gatekeeper-translocated copy, and an `EROFS` failure when probing the bundle's parent directory. A general writability test was rejected deliberately — a `/Applications` copy owned by another admin account is not writable by this process either, and there the updater's own privileged prompt succeeds.
+- The macOS release job now unpacks the `.app.tar.gz` it produced and runs the full signature, hardened-runtime, staple and `spctl` assertions against the extracted bundle. That archive, not the `.app` or the `.dmg`, is what the updater unpacks over a running install, so it is the artifact whose signature decides whether an updated copy still launches. The assertions were factored into a shared shell function rather than duplicated.
+- The version check and the updater keep separate sources (GitHub Releases API and `latest.json`). Collapsing them onto the updater's `check()` would mean a missing platform entry or a failed updater request reports "you're on the latest version" and hides the download link too.
+- No `tauri-plugin-process` dependency: `AppHandle::restart` is in Tauri core, and the plugin only wraps it for IPC.
+- `MAINSTREAM_AGENT_KEYS` is gone. Grouping now reads `ToolInfo.installed`, which the backend already reported, so nobody has to re-curate a membership list as products rise and fall — the previous one had gone stale within days of being edited.
+- `DEFAULT_PRIORITY_ORDER` grew from 9 entries to a ranked head of 23, measured 2026-08-07 from GitHub stars for the open-source agents and market position for the closed-source ones. The rationale, the numbers and the caveat that stars overstate general-purpose assistants are recorded next to the list, so the next edit starts from evidence rather than impressions. Existing saved orders still take precedence; this only changes what a user who has never dragged sees.
+
+## [1.29.0] - 2026-08-05
+
+### Release Overview
+- macOS builds are now signed with an Apple Developer ID certificate and notarized by Apple. Downloading the app and opening it just works — no "unidentified developer" dialog, no trip through System Settings, no Terminal commands.
+
+### User-facing
+- **macOS no longer blocks the app on first launch** — Previous builds were ad-hoc signed, which is enough to avoid the "app is damaged" error but not enough for Gatekeeper: every user still had to click through "Apple could not verify … is free of malware" and find **Open Anyway** in System Settings → Privacy & Security. Builds are now signed with a Developer ID Application certificate, submitted to Apple for notarization, and have the resulting ticket stapled to the bundle, which is what lets Gatekeeper approve them silently.
+- **One-time keychain re-authorization when you upgrade** — Moving to a Developer ID certificate changes the app's code signature, and macOS ties keychain permissions to that signature. The first launch after upgrading asks again for access to the `skills-manager-git-backup` entry (the GitHub backup token). Choose **Always Allow**; because the signing identity is now stable across releases, later updates should not ask again.
+- Releases up to and including v1.28.5 are unaffected and still need the workarounds documented in the README.
+
+### Developer & Governance
+- Release builds sign with `APPLE_SIGNING_IDENTITY` from repository secrets instead of the hard-coded ad-hoc `-` identity that was introduced to work around #138.
+- Notarization authenticates with an App Store Connect API key rather than an Apple ID plus app-specific password. The key is scoped to notarization instead of the whole Apple account, and — unlike app-specific passwords, which Apple revokes automatically whenever the account password changes — it does not silently break the release pipeline later.
+- A new pre-build step validates every required macOS secret and fails the job by name if one is missing. Without it a missing secret makes `tauri-action` fall back to a linker-only signature that has no sealed resources and fails `codesign --verify`, which is exactly the #138 failure mode.
+- The same step decodes the API key into `$RUNNER_TEMP/private_keys/AuthKey_<KeyID>.p8` (Tauri wants a path, not the key contents), restricts it to mode 600, and rejects a value that does not decode to a PEM private key.
+- Signing credentials are exposed as step-level environment variables, so the checkout, Node, Rust toolchain, and cache actions never see them.
+- Post-build verification now asserts the signing authority is a Developer ID Application certificate and that the hardened runtime is enabled, then runs `xcrun stapler validate` and `spctl --assess` — the same check macOS performs at first launch.
+- Both READMEs describe the notarized behaviour and scope the old Gatekeeper workarounds to the releases that actually need them.
+
 ## [1.28.5] - 2026-08-04
 
 ### Release Overview

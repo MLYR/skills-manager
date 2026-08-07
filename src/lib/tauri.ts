@@ -806,6 +806,12 @@ export interface AppUpdateInfo {
 export const checkAppUpdate = () =>
   invoke<AppUpdateInfo>("check_app_update");
 
+/** Non-null when the app runs from somewhere an in-app update cannot be applied. */
+export const updateInstallBlocker = () =>
+  invoke<string | null>("update_install_blocker");
+
+export const restartApp = () => invoke<void>("restart_app");
+
 export interface DiagnosticInfo {
   app_version: string;
   os: string;
