@@ -32,8 +32,10 @@ dist-ssr
 *.sw?
 
 .claude
-docs
+docs/*
+!docs/ai-analysis/
+!docs/ai-analysis/**
 reference
 CLAUDE.md
+AGENTS.md
 .loop-log
-

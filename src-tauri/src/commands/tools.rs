@@ -13,10 +13,10 @@ use crate::core::sync_engine;
 use crate::core::timing::should_log_first_or_slow;
 use crate::core::tool_adapters::{self, CustomToolDef, ToolCategory};
 use crate::core::tool_service::{
-    self, ToolInfo, get_custom_tool_paths, get_custom_tool_project_paths, get_custom_tools,
+    self, get_custom_tool_paths, get_custom_tool_project_paths, get_custom_tools,
     get_disabled_tools, get_tool_order, normalize_project_relative_skills_dir_input,
     normalize_skills_dir_input, set_custom_tool_paths, set_custom_tool_project_paths,
-    set_custom_tools, set_disabled_tools, set_tool_order,
+    set_custom_tools, set_disabled_tools, set_tool_order, ToolInfo,
 };
 
 #[derive(Debug, Serialize)]
@@ -106,25 +106,38 @@ pub async fn set_tool_enabled(
 ) -> Result<(), AppError> {
     let store = store.inner().clone();
     let result = tauri::async_runtime::spawn_blocking(move || {
-        let mut disabled = get_disabled_tools(&store);
-        if enabled {
-            disabled.retain(|k| k != &key);
-            set_disabled_tools(&store, &disabled)?;
-            sync_active_scenario_to_tool(&store, &key);
-            Ok(())
-        } else {
-            if !disabled.contains(&key) {
-                disabled.push(key.clone());
-            }
-            unsync_all_for_tool(&store, &key);
-            set_disabled_tools(&store, &disabled)
-        }
+        set_tool_enabled_internal(&store, &key, enabled)
     })
     .await?;
     if result.is_ok() {
         refresh_tray_menu_best_effort(&app);
     }
     result
+}
+
+/// Shared GUI/CLI implementation for the global agent toggle.
+pub fn set_tool_enabled_internal(
+    store: &SkillStore,
+    key: &str,
+    enabled: bool,
+) -> Result<(), AppError> {
+    if tool_adapters::find_adapter_with_store(store, key).is_none() {
+        return Err(AppError::not_found(format!("Unknown agent: {key}")));
+    }
+
+    let mut disabled = get_disabled_tools(store);
+    if enabled {
+        disabled.retain(|item| item != key);
+        set_disabled_tools(store, &disabled)?;
+        sync_active_scenario_to_tool(store, key);
+        Ok(())
+    } else {
+        if !disabled.iter().any(|item| item == key) {
+            disabled.push(key.to_string());
+        }
+        unsync_all_for_tool(store, key);
+        set_disabled_tools(store, &disabled)
+    }
 }
 
 #[tauri::command]
@@ -139,7 +152,16 @@ pub async fn set_all_tools_enabled(
             set_disabled_tools(&store, &[])?;
             // Re-sync active scenario skills to all (now-enabled) installed tools
             if let Ok(Some(active_id)) = store.get_active_scenario_id() {
-                sync_scenario_skills(&store, &active_id).ok();
+                // Enabling the tools succeeded either way; a target we may not
+                // replace is reported, not fatal (#363).
+                match sync_scenario_skills(&store, &active_id) {
+                    Ok(refusals) => {
+                        for refusal in refusals {
+                            log::warn!("enable-all-tools sync skipped a target: {refusal}");
+                        }
+                    }
+                    Err(e) => log::warn!("enable-all-tools sync failed: {e}"),
+                }
             }
             Ok(())
         } else {
@@ -175,6 +197,58 @@ pub async fn set_tool_order_cmd(
     tauri::async_runtime::spawn_blocking(move || set_tool_order(&store, &order)).await?
 }
 
+/// Whether a built-in adapter claims this key. Resolution consults built-ins
+/// before custom tools, so a key that answers `true` here must have its
+/// overrides written to the side maps, never onto a custom tool definition.
+fn is_builtin_key(key: &str) -> bool {
+    tool_adapters::default_tool_adapters()
+        .iter()
+        .any(|a| a.key == key)
+}
+
+/// Store side of [`set_custom_tool_path`], separated so the write can be
+/// tested against a real store without a Tauri runtime.
+pub(crate) fn apply_tool_skills_dir(
+    store: &SkillStore,
+    key: &str,
+    path: &str,
+) -> Result<(), AppError> {
+    let key = key.trim().to_string();
+    let path = normalize_skills_dir_input(path)?;
+    if key.is_empty() || path.is_empty() {
+        return Err(AppError::invalid_input("Key and path are required"));
+    }
+
+    let old_adapter = tool_adapters::find_adapter_with_store(store, &key)
+        .ok_or_else(|| AppError::not_found(format!("Unknown tool: {key}")))?;
+    let old_skills_dir = old_adapter.skills_dir();
+
+    // Resolution prefers a built-in over a custom tool of the same key
+    // (`find_adapter_with_store`), so the write has to agree. A custom agent
+    // whose key later became a built-in one otherwise stores the new path on a
+    // definition nothing reads, and the save reports success while the
+    // displayed path never moves (#378).
+    let mut customs = get_custom_tools(store);
+    match customs.iter_mut().find(|c| c.key == key) {
+        Some(custom) if !is_builtin_key(&key) => {
+            custom.skills_dir = path;
+            set_custom_tools(store, &customs)?;
+        }
+        _ => {
+            let mut paths = get_custom_tool_paths(store);
+            paths.insert(key.clone(), path);
+            set_custom_tool_paths(store, &paths)?;
+        }
+    }
+
+    let new_adapter = tool_adapters::find_adapter_with_store(store, &key)
+        .ok_or_else(|| AppError::not_found(format!("Unknown tool: {key}")))?;
+    if old_skills_dir != new_adapter.skills_dir() {
+        reconcile_tool_sync_after_path_change(store, &key);
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn set_custom_tool_path(
     key: String,
@@ -182,35 +256,7 @@ pub async fn set_custom_tool_path(
     store: State<'_, Arc<SkillStore>>,
 ) -> Result<(), AppError> {
     let store = store.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        let key = key.trim().to_string();
-        let path = normalize_skills_dir_input(&path)?;
-        if key.is_empty() || path.is_empty() {
-            return Err(AppError::invalid_input("Key and path are required"));
-        }
-
-        let old_adapter = tool_adapters::find_adapter_with_store(&store, &key)
-            .ok_or_else(|| AppError::not_found(format!("Unknown tool: {key}")))?;
-        let old_skills_dir = old_adapter.skills_dir();
-
-        let mut customs = get_custom_tools(&store);
-        if let Some(custom) = customs.iter_mut().find(|c| c.key == key) {
-            custom.skills_dir = path;
-            set_custom_tools(&store, &customs)?;
-        } else {
-            let mut paths = get_custom_tool_paths(&store);
-            paths.insert(key.clone(), path);
-            set_custom_tool_paths(&store, &paths)?;
-        }
-
-        let new_adapter = tool_adapters::find_adapter_with_store(&store, &key)
-            .ok_or_else(|| AppError::not_found(format!("Unknown tool: {key}")))?;
-        if old_skills_dir != new_adapter.skills_dir() {
-            reconcile_tool_sync_after_path_change(&store, &key);
-        }
-        Ok(())
-    })
-    .await?
+    tauri::async_runtime::spawn_blocking(move || apply_tool_skills_dir(&store, &key, &path)).await?
 }
 
 #[tauri::command]
@@ -238,6 +284,58 @@ pub async fn reset_custom_tool_path(
     .await?
 }
 
+/// Store side of [`set_custom_tool_project_path`], separated so the write can
+/// be tested against a real store without a Tauri runtime.
+pub(crate) fn apply_tool_project_skills_dir(
+    store: &SkillStore,
+    key: &str,
+    project_relative_skills_dir: Option<&str>,
+) -> Result<(), AppError> {
+    let key = key.trim().to_string();
+    if key.is_empty() {
+        return Err(AppError::invalid_input("Key is required"));
+    }
+    let normalized = normalize_project_relative_skills_dir_input(
+        project_relative_skills_dir.unwrap_or_default(),
+    )?;
+
+    // Built-in tools keep overrides in a side map keyed by tool key. Resolve
+    // the built-in default project path (no store overrides) to validate the
+    // key and to detect no-op edits: an empty value, or one equal to the
+    // default, removes the override and restores the default.
+    //
+    // Checked before custom tools, matching how resolution reads them back
+    // (#378) — see `apply_tool_skills_dir`.
+    let default_project_path = match tool_adapters::default_tool_adapters()
+        .into_iter()
+        .find(|a| a.key == key)
+        .map(|a| a.project_relative_skills_dir().to_string())
+    {
+        Some(default_project_path) => default_project_path,
+        // Custom tools store the project path on their definition; clearing it
+        // (None) drops project-workspace support for that agent.
+        None => {
+            let mut customs = get_custom_tools(store);
+            let custom = customs
+                .iter_mut()
+                .find(|c| c.key == key)
+                .ok_or_else(|| AppError::not_found(format!("Unknown tool: {key}")))?;
+            custom.project_relative_skills_dir = normalized;
+            return set_custom_tools(store, &customs);
+        }
+    };
+    let mut project_paths = get_custom_tool_project_paths(store);
+    match normalized {
+        Some(path) if path != default_project_path => {
+            project_paths.insert(key, path);
+        }
+        _ => {
+            project_paths.remove(&key);
+        }
+    }
+    set_custom_tool_project_paths(store, &project_paths)
+}
+
 #[tauri::command]
 pub async fn set_custom_tool_project_path(
     key: String,
@@ -246,41 +344,7 @@ pub async fn set_custom_tool_project_path(
 ) -> Result<(), AppError> {
     let store = store.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let key = key.trim().to_string();
-        if key.is_empty() {
-            return Err(AppError::invalid_input("Key is required"));
-        }
-        let normalized = normalize_project_relative_skills_dir_input(
-            project_relative_skills_dir.as_deref().unwrap_or_default(),
-        )?;
-
-        // Custom tools store the project path on their definition; clearing it
-        // (None) drops project-workspace support for that agent.
-        let mut customs = get_custom_tools(&store);
-        if let Some(custom) = customs.iter_mut().find(|c| c.key == key) {
-            custom.project_relative_skills_dir = normalized;
-            return set_custom_tools(&store, &customs);
-        }
-
-        // Built-in tools keep overrides in a side map keyed by tool key.
-        // Resolve the built-in default project path (no store overrides) to
-        // validate the key and to detect no-op edits: an empty value, or one
-        // equal to the default, removes the override and restores the default.
-        let default_project_path = tool_adapters::default_tool_adapters()
-            .into_iter()
-            .find(|a| a.key == key)
-            .map(|a| a.project_relative_skills_dir().to_string())
-            .ok_or_else(|| AppError::not_found(format!("Unknown tool: {key}")))?;
-        let mut project_paths = get_custom_tool_project_paths(&store);
-        match normalized {
-            Some(path) if path != default_project_path => {
-                project_paths.insert(key, path);
-            }
-            _ => {
-                project_paths.remove(&key);
-            }
-        }
-        set_custom_tool_project_paths(&store, &project_paths)
+        apply_tool_project_skills_dir(&store, &key, project_relative_skills_dir.as_deref())
     })
     .await?
 }
@@ -391,6 +455,80 @@ mod tests {
     use crate::core::skill_store::{ScenarioRecord, SkillRecord};
     use std::fs;
     use tempfile::tempdir;
+
+    /// #378: a user names a custom agent after one that later ships built-in.
+    /// The key is derived from the display name, so "DeepSeek Harness" becomes
+    /// `deepseek_harness` — and the collision check at creation time only knew
+    /// the keys that existed then. Resolution now prefers the built-in, so a
+    /// write that landed on the custom definition was stored where nothing
+    /// reads it: the save reported success and the path never moved.
+    fn store_with_colliding_custom_tool(dir: &std::path::Path, key: &str) -> SkillStore {
+        let store = SkillStore::new(&dir.join("test.db")).unwrap();
+        let customs = vec![CustomToolDef {
+            key: key.to_string(),
+            display_name: "DeepSeek Harness".to_string(),
+            skills_dir: "/tmp/whatever-they-had".to_string(),
+            project_relative_skills_dir: Some(".old/skills".to_string()),
+            category: ToolCategory::Coding,
+        }];
+        store
+            .set_setting("custom_tools", &serde_json::to_string(&customs).unwrap())
+            .unwrap();
+        store
+    }
+
+    #[test]
+    fn a_path_edit_survives_a_custom_tool_shadowed_by_a_builtin() {
+        let tmp = tempdir().unwrap();
+        let store = store_with_colliding_custom_tool(tmp.path(), "deepseek_harness");
+        let chosen = tmp.path().join("chosen");
+
+        apply_tool_skills_dir(
+            &store,
+            "deepseek_harness",
+            &chosen.to_string_lossy(),
+        )
+        .unwrap();
+
+        let adapter = tool_adapters::find_adapter_with_store(&store, "deepseek_harness").unwrap();
+        assert_eq!(adapter.skills_dir(), chosen, "the edit must be what resolves");
+        assert!(adapter.has_path_override());
+    }
+
+    #[test]
+    fn a_project_path_edit_survives_the_same_shadowing() {
+        let tmp = tempdir().unwrap();
+        let store = store_with_colliding_custom_tool(tmp.path(), "deepseek_harness");
+
+        apply_tool_project_skills_dir(&store, "deepseek_harness", Some(".mine/skills")).unwrap();
+
+        let adapter = tool_adapters::find_adapter_with_store(&store, "deepseek_harness").unwrap();
+        assert_eq!(adapter.project_relative_skills_dir(), ".mine/skills");
+    }
+
+    /// A genuine custom agent — no built-in claims its key — still keeps both
+    /// paths on its own definition, which is where its adapter reads them.
+    #[test]
+    fn a_real_custom_tool_still_stores_its_paths_on_its_definition() {
+        let tmp = tempdir().unwrap();
+        let store = store_with_colliding_custom_tool(tmp.path(), "my_own_agent");
+        let chosen = tmp.path().join("chosen");
+
+        apply_tool_skills_dir(&store, "my_own_agent", &chosen.to_string_lossy()).unwrap();
+        apply_tool_project_skills_dir(&store, "my_own_agent", Some(".mine/skills")).unwrap();
+
+        let customs = get_custom_tools(&store);
+        let custom = customs.iter().find(|c| c.key == "my_own_agent").unwrap();
+        assert_eq!(std::path::Path::new(&custom.skills_dir), chosen);
+        assert_eq!(
+            custom.project_relative_skills_dir.as_deref(),
+            Some(".mine/skills")
+        );
+
+        let adapter = tool_adapters::find_adapter_with_store(&store, "my_own_agent").unwrap();
+        assert_eq!(adapter.skills_dir(), chosen);
+        assert_eq!(adapter.project_relative_skills_dir(), ".mine/skills");
+    }
 
     fn sample_skill(id: &str, name: &str, central_path: &std::path::Path) -> SkillRecord {
         SkillRecord {

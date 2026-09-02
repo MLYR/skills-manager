@@ -24,6 +24,9 @@ jobs:
           - platform: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
             label: Linux-x64
+          - platform: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            label: Linux-arm64
           - platform: windows-latest
             target: x86_64-pc-windows-msvc
             label: Windows-x64
@@ -65,14 +68,15 @@ jobs:
           save-if: false
 
       - name: Install Linux system dependencies
-        if: matrix.platform == 'ubuntu-22.04'
+        if: startsWith(matrix.platform, 'ubuntu-')
         run: |
           sudo apt-get update
           sudo apt-get install -y \
             libwebkit2gtk-4.1-dev \
             libappindicator3-dev \
             librsvg2-dev \
-            patchelf
+            patchelf \
+            xdg-utils
 
       - name: Install frontend dependencies
         run: npm ci
@@ -80,6 +84,13 @@ jobs:
       - name: Windows smoke check
         if: matrix.platform == 'windows-latest'
         run: cargo check --manifest-path src-tauri/Cargo.toml
+
+      - name: Build CLI binary
+        run: >-
+          cargo build --release
+          --manifest-path src-tauri/Cargo.toml
+          --bin skills-manager-cli
+          --target ${{ matrix.target }}
 
       - name: Extract changelog for current version
         id: changelog
@@ -114,7 +125,7 @@ jobs:
             echo ""
             echo "### 当前校验状态"
             echo ""
-            echo "- ✅ 跨平台构建通过（macOS Intel / macOS ARM / Windows x64 / Linux x64）"
+            echo "- ✅ 跨平台构建通过（macOS Intel / macOS ARM / Windows x64 / Linux x64 / Linux ARM64）"
             echo "- ✅ TypeScript typecheck 通过"
             echo ""
             echo "---"
@@ -128,7 +139,7 @@ jobs:
             echo ""
             echo "### Current Verification"
             echo ""
-            echo "- ✅ Cross-platform build passed (macOS Intel / macOS ARM / Windows x64 / Linux x64)"
+            echo "- ✅ Cross-platform build passed (macOS Intel / macOS ARM / Windows x64 / Linux x64 / Linux ARM64)"
             echo "- ✅ TypeScript typecheck passed"
             echo ""
             echo "</details>"
@@ -279,6 +290,106 @@ jobs:
             xcrun stapler validate "$DMG_PATH" || echo "Note: .dmg itself is not stapled"
           fi
 
+      - name: Sign and notarize macOS CLI binary
+        if: startsWith(matrix.platform, 'macos')
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+        run: |
+          set -euo pipefail
+          umask 077
+          CERTIFICATE_PATH="$RUNNER_TEMP/cli-signing-certificate.p12"
+          KEYCHAIN_PATH="$RUNNER_TEMP/cli-signing.keychain-db"
+          KEYCHAIN_PASSWORD="$(uuidgen)"
+          ORIGINAL_KEYCHAINS=()
+          while IFS= read -r keychain; do
+            keychain="${keychain#*\"}"
+            keychain="${keychain%\"*}"
+            if [ -n "$keychain" ]; then
+              ORIGINAL_KEYCHAINS+=("$keychain")
+            fi
+          done < <(security list-keychains -d user)
+          cleanup_keychain() {
+            if [ "${#ORIGINAL_KEYCHAINS[@]}" -gt 0 ]; then
+              security list-keychains -d user -s "${ORIGINAL_KEYCHAINS[@]}" \
+                2>/dev/null || true
+            fi
+            security delete-keychain "$KEYCHAIN_PATH" 2>/dev/null || true
+            rm -f "$CERTIFICATE_PATH"
+          }
+          trap cleanup_keychain EXIT
+
+          # tauri-action imports the certificate into a temporary keychain that
+          # it removes when its own step ends. The standalone CLI is signed in a
+          # later step, so install the same certificate into a step-local keychain
+          # following GitHub's documented macOS signing pattern.
+          printf '%s' "$APPLE_CERTIFICATE" | base64 --decode > "$CERTIFICATE_PATH"
+          chmod 600 "$CERTIFICATE_PATH"
+          security delete-keychain "$KEYCHAIN_PATH" 2>/dev/null || true
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security import "$CERTIFICATE_PATH" \
+            -P "$APPLE_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 \
+            -k "$KEYCHAIN_PATH"
+          security set-key-partition-list \
+            -S apple-tool:,apple: -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security list-keychains -d user -s "$KEYCHAIN_PATH"
+
+          CLI_PATH="src-tauri/target/${{ matrix.target }}/release/skills-manager-cli"
+          codesign --force --options runtime --timestamp \
+            --sign "$APPLE_SIGNING_IDENTITY" "$CLI_PATH"
+          codesign --verify --strict --verbose=2 "$CLI_PATH"
+          CLI_SIG_INFO="$(codesign -dvvv "$CLI_PATH" 2>&1)"
+          grep -E 'Authority|Identifier|Timestamp|flags=' <<<"$CLI_SIG_INFO"
+          grep -q 'Authority=Developer ID Application:' <<<"$CLI_SIG_INFO" || {
+            echo "CLI is not signed with a Developer ID Application certificate" >&2
+            exit 1
+          }
+          grep -qE 'flags=[^)]*runtime' <<<"$CLI_SIG_INFO" || {
+            echo "Hardened runtime is not enabled on the CLI" >&2
+            exit 1
+          }
+          CLI_ARCHIVE="$RUNNER_TEMP/skills-manager-cli-${{ matrix.label }}.zip"
+          ditto -c -k --keepParent "$CLI_PATH" "$CLI_ARCHIVE"
+          NOTARY_RESULT="$(xcrun notarytool submit "$CLI_ARCHIVE" \
+            --key "$APPLE_API_KEY_PATH" \
+            --key-id "$APPLE_API_KEY" \
+            --issuer "$APPLE_API_ISSUER" \
+            --wait --output-format json)"
+          printf '%s\n' "$NOTARY_RESULT"
+          jq -e '.status == "Accepted"' <<<"$NOTARY_RESULT" >/dev/null || {
+            echo "Apple did not accept the CLI notarization submission" >&2
+            exit 1
+          }
+          # A standalone executable cannot carry a stapled ticket, and
+          # `spctl --type execute` classifies a bare CLI as "not an app" even
+          # after notarization succeeds. The release gate is therefore the
+          # verified Developer ID signature plus Apple's explicit Accepted status.
+
+      - name: Upload CLI binary to draft release
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [[ "${{ matrix.platform }}" == "windows-latest" ]]; then
+            CLI_PATH="src-tauri/target/${{ matrix.target }}/release/skills-manager-cli.exe"
+            CLI_ASSET="skills-manager-cli-${{ matrix.label }}.exe"
+          else
+            CLI_PATH="src-tauri/target/${{ matrix.target }}/release/skills-manager-cli"
+            CLI_ASSET="skills-manager-cli-${{ matrix.label }}"
+          fi
+          CLI_UPLOAD="$RUNNER_TEMP/$CLI_ASSET"
+          cp "$CLI_PATH" "$CLI_UPLOAD"
+          gh release upload "${{ github.ref_name }}" \
+            --repo "${{ github.repository }}" \
+            "$CLI_UPLOAD" --clobber
+
   verify-updater-assets:
     needs: build
     if: startsWith(github.ref, 'refs/tags/')
@@ -320,6 +431,18 @@ jobs:
             exit 1
           fi
 
+          fail=0
+          for cli_asset in \
+            skills-manager-cli-macOS-arm64 \
+            skills-manager-cli-macOS-x64 \
+            skills-manager-cli-Windows-x64.exe \
+            skills-manager-cli-Linux-x64; do
+            if ! echo "$asset_names" | grep -qx "$cli_asset"; then
+              echo "Missing CLI release asset: ${cli_asset}" >&2
+              fail=1
+            fi
+          done
+
           # Draft assets are not served from the public download host, so fetch
           # latest.json through the authenticated asset endpoint.
           asset_id=$(echo "$release_json" | jq -r '.assets[] | select(.name == "latest.json") | .id')
@@ -330,7 +453,6 @@ jobs:
 
           # v1.29.0 published with no darwin entries at all because only Windows
           # and Linux were asserted here, so every shipped platform is checked now.
-          fail=0
           for platform in darwin-aarch64 darwin-x86_64 windows-x86_64 linux-x86_64; do
             if ! jq -e --arg p "$platform" '.platforms[$p].signature and .platforms[$p].url' /tmp/latest.json >/dev/null; then
               echo "latest.json is missing a signed updater entry for ${platform}" >&2
@@ -372,3 +494,23 @@ jobs:
             --repo "${{ github.repository }}" \
             --draft=false
           echo "Published ${{ github.ref_name }}"
+
+      # skillsmanager.dev reads the version and download links from the GitHub
+      # API behind an hourly ISR cache, so a low-traffic page can advertise the
+      # previous release long after it shipped. Rebuilding on publish keeps the
+      # site in step. The hook is optional, and a failed rebuild must not turn a
+      # successful release red — the site catches up on its own within the hour.
+      - name: Rebuild skillsmanager.dev
+        env:
+          HOOK: ${{ secrets.VERCEL_DEPLOY_HOOK_URL }}
+        run: |
+          set -uo pipefail
+          if [ -z "${HOOK:-}" ]; then
+            echo "VERCEL_DEPLOY_HOOK_URL not set — skipping site rebuild."
+            exit 0
+          fi
+          if curl -fsS -X POST "$HOOK" -o /dev/null; then
+            echo "Triggered a skillsmanager.dev rebuild."
+          else
+            echo "::warning::Deploy hook failed; skillsmanager.dev will refresh on its own."
+          fi

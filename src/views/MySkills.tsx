@@ -660,6 +660,14 @@ export function MySkills() {
       if (result.unchanged > 0) {
         toast.info(t("mySkills.batchAlreadyUpToDate", { count: result.unchanged }));
       }
+      if (result.held_back.length > 0) {
+        toast.warning(
+          t("mySkills.batchHeldBack", {
+            count: result.held_back.length,
+            names: result.held_back.slice(0, 3).join("、"),
+          })
+        );
+      }
       if (result.failed.length > 0) {
         toast.error(t("mySkills.batchUpdateFailed", { count: result.failed.length }));
       }
@@ -670,6 +678,16 @@ export function MySkills() {
       setBatchUpdating(false);
     }
   };
+
+  /** The update the user has been asked to confirm, and what it would remove. */
+  const [pendingRemoval, setPendingRemoval] = useState<{
+    skill: ManagedSkill;
+    removals: api.PendingRemoval[];
+    approval: string | null;
+    /** Set when the pending replacement is a relink, so confirming re-uses the
+     *  directory the user already chose instead of asking for it again. */
+    relinkSource?: string;
+  } | null>(null);
 
   const handleUpdateAvailableSkills = async () => {
     const updatableSkills = skills.filter(
@@ -685,6 +703,14 @@ export function MySkills() {
       }
       if (result.unchanged > 0) {
         toast.info(t("mySkills.batchAlreadyUpToDate", { count: result.unchanged }));
+      }
+      if (result.held_back.length > 0) {
+        toast.warning(
+          t("mySkills.batchHeldBack", {
+            count: result.held_back.length,
+            names: result.held_back.slice(0, 3).join("、"),
+          })
+        );
       }
       if (result.failed.length > 0) {
         toast.error(t("mySkills.batchUpdateFailed", { count: result.failed.length }));
@@ -736,14 +762,32 @@ export function MySkills() {
     }
   };
 
-  const handleRefreshSkill = async (skill: ManagedSkill) => {
+  const handleRefreshSkill = async (skill: ManagedSkill, approvedRemovals?: string) => {
     setUpdatingSkillId(skill.id);
     try {
       if (skill.source_type === "local" || skill.source_type === "import") {
-        await api.reimportLocalSkill(skill.id);
+        const result = await api.reimportLocalSkill(skill.id, approvedRemovals);
+        if (result.pending_removals.length > 0) {
+          setPendingRemoval({
+            skill,
+            removals: result.pending_removals,
+            approval: result.removal_approval,
+          });
+          return;
+        }
         toast.success(t("mySkills.updateActions.reimported"));
       } else {
-        const result = await api.updateSkill(skill.id);
+        const result = await api.updateSkill(skill.id, approvedRemovals);
+        // Nothing was changed: the update would have taken away files the new
+        // version does not have. Show them and let the user decide (#256).
+        if (result.pending_removals.length > 0) {
+          setPendingRemoval({
+            skill,
+            removals: result.pending_removals,
+            approval: result.removal_approval,
+          });
+          return;
+        }
         if (result.content_changed) {
           toast.success(t("mySkills.updateActions.updated"));
         } else {
@@ -759,13 +803,31 @@ export function MySkills() {
     }
   };
 
-  const handleRelinkSource = async (skill: ManagedSkill) => {
-    const selected = await dialogOpen({ directory: true, multiple: false });
+  const handleRelinkSource = async (
+    skill: ManagedSkill,
+    presetSource?: string,
+    approvedRemovals?: string,
+  ) => {
+    const selected =
+      presetSource ?? (await dialogOpen({ directory: true, multiple: false }));
     if (!selected || Array.isArray(selected)) return;
 
     setUpdatingSkillId(skill.id);
     try {
-      await api.relinkLocalSkillSource(skill.id, selected);
+      const result = await api.relinkLocalSkillSource(
+        skill.id,
+        selected,
+        approvedRemovals,
+      );
+      if (result.pending_removals.length > 0) {
+        setPendingRemoval({
+          skill,
+          removals: result.pending_removals,
+          approval: result.removal_approval,
+          relinkSource: selected,
+        });
+        return;
+      }
       toast.success(t("mySkills.updateActions.relinked"));
       await refreshManagedSkills();
     } catch (error: unknown) {
@@ -1777,6 +1839,34 @@ export function MySkills() {
         onProjectsChanged={refreshProjects}
       />
 
+      <ConfirmDialog
+        open={pendingRemoval !== null}
+        tone="warning"
+        title={t("mySkills.updateActions.removalTitle")}
+        message={t("mySkills.updateActions.removalMessage", {
+          name: pendingRemoval?.skill.name ?? "",
+          count: pendingRemoval?.removals.length ?? 0,
+        })}
+        // Every path, never a truncated sample: recognising one's own file is
+        // the whole point, and it might be the twenty-first.
+        details={pendingRemoval?.removals.map((r) =>
+          r.location === "library" ? r.path : `${r.location}: ${r.path}`
+        )}
+        confirmLabel={t("mySkills.updateActions.removalConfirm")}
+        onClose={() => setPendingRemoval(null)}
+        onConfirm={async () => {
+          const target = pendingRemoval?.skill;
+          const approval = pendingRemoval?.approval ?? undefined;
+          const relinkSource = pendingRemoval?.relinkSource;
+          setPendingRemoval(null);
+          if (!target) return;
+          if (relinkSource) {
+            await handleRelinkSource(target, relinkSource, approval);
+          } else {
+            await handleRefreshSkill(target, approval);
+          }
+        }}
+      />
       <ConfirmDialog
         open={batchDeleteConfirm}
         message={t("mySkills.batchDeleteConfirm", { count: selectedIds.size })}

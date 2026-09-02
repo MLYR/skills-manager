@@ -5,6 +5,167 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.36.0] - 2026-08-29
+
+### Release Overview
+- Your coding agents can now drive Skills Manager themselves — installing, updating and deploying skills on your behalf, through the same library and sync engine the app uses.
+
+### User-facing
+- **Let your agents manage skills** — Claude Code, Codex, Cursor and the rest can now install a skill, deploy it to another agent, or report what is where, by driving Skills Manager rather than writing into an agent's folder behind its back. Sources, preset membership, update tracking and per-agent deployment state all stay intact. The Dashboard offers a one-time setup: pick which agents should be able to do it, and the app installs the `manage-skills` skill and deploys it to exactly those. Nothing is pre-selected, and the prompt disappears for good once you have acted on it or dismissed it — afterwards it is an ordinary library skill, managed from the agent badges on its own card.
+- **The CLI is where agents can find it** — The command-line tool has always shipped inside the desktop app, but on macOS it sat inside the `.app` and on Windows inside the install directory, where nothing could reach it. The app now keeps a copy at `~/.skills-manager/bin/`, refreshed on every launch, so agents can use it without anything being added to your PATH. On Linux the `.deb` and `.rpm` already placed it on PATH and still do.
+- **A refused deployment now says which directory is in the way** — When a deploy would overwrite something Skills Manager does not own, it refuses and leaves your content untouched. Until now the reason arrived as one long sentence, so an agent asked to do the deployment could only read it back to you. It now carries the actual path, which means your agent can name the directory, confirm nothing in it was deleted, and offer to import it into the library or move it aside.
+
+### Developer & Governance
+- New `core/cli_bridge.rs` publishes the bundled CLI to `~/.skills-manager/bin/` off the main thread at startup. A copy rather than a symlink: an AppImage is mounted at a temporary path, Windows reserves symlink creation for administrators, and a relocated `.app` would leave a dangling link. The location is the home directory rather than `central_repo::base_dir()`, which the user can move.
+- A `.version` stamp is written last and removed first, and gates the copy: a stale bridge can be a binary that predates the #363 fix and so deletes user directories a current one refuses to touch, which the database's own `user_version` gate cannot catch because such a fix carries no migration. Invalidation has three fallbacks — unlink, truncate, remove the binary itself — so a locked or read-only stamp on Windows cannot leave the pair vouching for itself; when none can take effect the publish is abandoned rather than run with a stamp that lies. The copy is verified by running `--version` with whole-token equality before it is published.
+- `AppError` gains an optional `details`, omitted from the wire format when absent, and an `ErrorKind::TargetConflict` that the CLI emits as a `TARGET_CONFLICT` envelope carrying `conflicts[].path`. Only an ownership refusal is classified that way: two library skills planning onto one path stays `InvalidInput`, and a target that cannot be inspected is `Io`, since telling a caller to adopt or move content that may not exist is worse than no advice. The refusal wording now has a single definition so the sentence and the structured form cannot drift.
+- The bundled `manage-skills` skill resolves the CLI before anything else, preferring the published copy over whatever is on PATH — a hand-installed binary is often several releases behind while writing the same database. Resolution yields a path to substitute into later commands rather than a shell variable, because each command an agent runs is a new process. An unstamped binary, or a stamp with no binary, stops the skill rather than sending it looking for something that may be older still.
+- Both READMEs now carry the skills.sh badge and the `npx skills add` line, so the skill has an entry point for people who never open the app.
+
+## [1.35.1] - 2026-08-28
+
+### Release Overview
+- In a project with two agents, an edit made under the second one could not reach the Skills Center, and following the status the app then showed would overwrite that edit. Fixed, together with the cases where no push is safe at all.
+
+### User-facing
+- **An edit under any agent now reaches the center** (#327) — A project skill exists once per agent directory and the card aggregates them. The card lit "update to center" if *any* copy was edited, but pushed the copy whose agent name sorted first. Editing under Codex while Claude Code was also configured therefore pushed the untouched Claude copy: the toast said success, nothing of the edit arrived, and the freshly written center then read as newer — so following the card to "update to project" destroyed the edit. The copy that actually carries the edit is pushed now, and the others are realigned from the center afterwards so the card settles instead of flipping. Thanks to @enshulv. Fixes #322.
+- **When no copy can be shown to be safe, nothing is written** — If more than one copy of a skill is anything other than in sync with the center, the update is refused and the conflict is named, rather than picking one and silently stranding the rest. Only "in sync" proves a copy holds nothing of its own: it is a content match, while "center is newer" is decided by timestamp *after* the contents already differed, so such a copy can hold work that a pull would destroy. **This is stricter than before**: two agents each holding their own not-yet-imported copy of the same skill now have to be reconciled into one before the center will accept it.
+
+### Developer & Governance
+- `classify_sync_status` returns `center_newer` only after the content hashes differ, then picks a side by mtime — it is not proof that the project copy is redundant. The realign step treated it as proof, and the refusal threshold was drawn at "edited" rather than "not provably clean"; both let a copy holding unique content be overwritten by a later action the card itself offered.
+- Pushing rebuilds the center directory, moving its mtime to now, which is what turned every stranded copy into `center_newer` — a status whose only remaining card action overwrites all variants, and which the backend's guard does not refuse (it refuses `project_newer` only). That chain, not the push itself, was the data-loss path.
+- Sibling realignment runs serially. Two agents' skills roots can be symlinks onto one directory, and each realign rebuilds its target, so concurrent calls on one path failed for no real reason and the batch counted it as a failure.
+- Three rounds of cross-vendor review; the substantive defects stopped appearing after the second. Widening the refusal made the bookkeeping it was working around unreachable, so the change ends 38 lines shorter than its first draft.
+- Known and unfixed: if two agents' skills roots are symlinks onto one directory, one physical skill scans as two edited copies and the refusal cannot be resolved by editing files. Collapsing roots by canonical path is a scanner change, deliberately not made here.
+- These are frontend-only changes and the repo has no frontend test runner, so `test.yml` does not cover them. Verification was `lint`, `build`, and review.
+
+## [1.35.0] - 2026-08-27
+
+### Release Overview
+- ZCode joins the supported agents, Linux ARM64 gets its own packages, and a fresh install now opens in the language your system is set to instead of always Simplified Chinese.
+- Kimi Code is repointed at the directories it actually reads. Skills synced to Kimi were being written where Kimi never looks — **after upgrading, sync Kimi once more**.
+
+### User-facing
+- **ZCode is supported out of the box** (#370) — User-level skills sync to `~/.zcode/skills/` and project-level skills to `<repo>/.zcode/skills`, the same symmetric layout as Claude Code. Plugin skills under `~/.zcode/cli/plugins/` are deliberately not scanned, matching the Claude Code plugin-marketplace policy. That brings the built-in agent count to 53. Thanks to @brofea, who also supplied the official mark from z.ai rather than a redrawn one. Closes #243, #319.
+- **Kimi Code skills land where Kimi reads them** (#270) — The adapter deployed to `~/.config/agents/skills` and looked for `~/.kimi` to decide Kimi was installed. Those are the *old kimi-cli*'s locations; kimi-code is a separate generation that reads `$KIMI_CODE_HOME/skills/` (default `~/.kimi-code/skills/`) and `<project>/.kimi-code/skills/`. So a sync reported success while Kimi saw nothing, and an installed Kimi was shown as missing. Both are fixed. **Upgrading rewrites the paths but does not move files**: skills already copied to `~/.config/agents/skills` stay there — that directory is still Amp's and Replit's — so Kimi needs one more sync for its skills to arrive. Thanks to @Libeny.
+- **A fresh install opens in your system's language** (#374) — The first-run language was hardcoded to Simplified Chinese, so anyone who does not read it had to find 设置 → 语言 in a UI they could not navigate. The first launch now reads `navigator.languages` and picks the first locale the app can serve, falling back to English. An explicit script beats the region, so `zh-Hans-HK` stays Simplified. An existing choice is never touched — this runs only when neither the saved setting nor localStorage has one. Thanks to @sammcj.
+- **Linux ARM64 has its own packages** (#351) — Releases shipped Linux x86_64, macOS ARM64 and Windows x64; an ARM64 Linux machine had nothing it could run, and the macOS ARM64 assets are Mach-O binaries that will not help. `.deb` and `.rpm` are now built natively on an ARM64 runner. Thanks to @superwjfeng.
+
+### Developer & Governance
+- Retargeting one tool no longer deletes a directory another tool is still deployed to. Adapters can share a skills directory — Amp and Replit both use `~/.config/agents/skills`, and Kimi did until this release — and the stale-target cleanup removed the path outright without checking who else was pointing at it. Introduced by the Kimi move and caught before release by a cross-vendor review; the regression test fails without the guard.
+- `detectLanguage` matches the primary subtag rather than a bare prefix. `startsWith("zh")` also matched `zha` (Zhuang) and `startsWith("en")` matched `enm` (Middle English), consuming the tag and discarding the next entry in the list, which is the one the user actually prefers.
+- Three ZCode pull requests were open at once (#338, #370, #390), none of them answered before the next arrived. #370 was taken for using z.ai's own mark; the other two are closed as superseded with the reason stated. The README count and the path-contract test came from #390's work.
+
+## [1.34.2] - 2026-08-16
+
+### Release Overview
+- A project copy you had just edited could be reported as the older side, and acting on that reading overwrote your edit. Both sides of the comparison now come from the files themselves.
+
+### User-facing
+- **Project sync status no longer judges the library by the wrong clock** — Freshness was decided by comparing the project copy's file timestamp against a database column that records when the library's row was written. Editing files in the library does not move that column, and a metadata-only write moves it while nothing changed, so a project copy you had just edited could be shown as "center is newer". Following that status and pulling from the center then replaced your edit. Both sides are now read from the files.
+- **The refusal that protects a newer local copy is more reliable** — "Pull from center" for an agent workspace declines when the local copy is ahead, and that check reads the same comparison, so a library whose row merely looked recent could defeat it.
+
+### Developer & Governance
+- `classify_sync_status` walks the center once and answers both the live-hash comparison and its newest content mtime from that walk — replacing one walk plus a database read, so there is no new cost and no cache needed to avoid one.
+- Diagnosis is from PR #328, which found it while building a much larger change. Only this part is taken: that PR also snapshots before overwriting and resolves conflicts newest-wins, both of which this project deliberately dropped — 1.34.0 answers the same moment by stopping and asking instead.
+- Two existing tests passed only because of the bug, each fabricating an `updated_at` old enough to stand in for age. They now build that age on disk and assert the database column cannot flip the answer. Reverse-verified in both directions.
+## [1.34.1] - 2026-08-16
+
+### Release Overview
+- Fixes a regression in 1.34.0: if you had already added DeepSeek Harness as a custom agent by hand, its skills paths became impossible to change.
+
+### User-facing
+- **A custom agent shadowed by a new built-in can have its paths edited again** (#378) — A custom agent's key is derived from its display name, so an agent added as "DeepSeek Harness" was stored under `deepseek_harness` — the same key 1.34.0 shipped as a built-in. From then on the built-in was what the app resolved and displayed, while path edits were written to the hidden custom definition: the save reported success and the path never moved. Both paths are editable again, and no cleanup is needed. The same would have happened to anyone whose hand-added agent shared a key with any future built-in.
+
+### Developer & Governance
+- `find_adapter_with_store` resolves a built-in ahead of a custom tool of the same key, but both path writers checked custom tools first and stored the edit where nothing reads it. Both now consult built-ins first; a genuine custom agent still keeps its paths on its own definition.
+- The store side of each command is split into `apply_tool_skills_dir` and `apply_tool_project_skills_dir` so the writes can be exercised against a real store — the commands are async and take Tauri `State`, which is why neither had a test.
+- 3 regression tests, reverse-verified: restoring the old precedence in either writer fails its test while the genuine-custom-agent case keeps passing.
+## [1.34.0] - 2026-08-16
+
+### Release Overview
+- An update can no longer quietly take away files that live inside a skill's folder. When the new version does not have paths that exist now, the update stops and names them instead of applying.
+
+### User-facing
+- **An update that would remove files now stops and says which ones** (#256) — Updating replaces a skill's folder wholesale, so anything written inside it that the new version does not have was destroyed without warning. The reporter lost the PowerPoint templates `ppt-master` had generated into its own `templates/`, and only found out afterwards. Every update now first works out which paths exist today and are simply absent from the new version. If any are, nothing is applied: the desktop app lists them and lets you decide, and the skill stays exactly as it was until you do.
+- **Unattended updates never make that decision for you** — The startup batch, the background scheduler and the CLI hold the skill back rather than proceed. Its update badge stays, so nothing is lost or hidden; you see the paths when you update it yourself. The CLI reports them as `held_back_removals`.
+- **Deployed copies are covered, not just the library** — An agent you deploy to in copy mode gets its folder rebuilt on every sync, so files written into that copy were at the same risk. Each reported path says where it lives, so you know which directory to rescue it from.
+- **Re-importing a local skill and re-pointing its source are guarded the same way** — Both replace the whole folder, and the batch button calls the first one "update" as well.
+- **Known limit, worth stating plainly**: this compares paths, not contents. A file you edited that the new version also ships keeps its path, so it reads as surviving and your edits are still overwritten silently. Keep local modifications outside the skill folder, or back the library up before updating.
+- **DeepSeek Harness is supported** — Deploys to `~/.dsh/skills`. 52 agents out of the box.
+- **Git backup no longer tracks compiled Python artifacts** — A skill that runs Python scripts filled the backup repository with `__pycache__/` and `.pyc` files that change on every run. They are now ignored and untracked from existing backups.
+
+### Developer & Governance
+- `core/removals.rs` answers one question — which paths exist under the current tree and not under the replacement — and nothing else. It compares by path, since a file whose contents change still exists afterwards and listing it would bury the ones that do not; rolls a wholly-absent directory up to a single entry, so a nested `.git` cannot bury the dialog under thousands of object files; treats a file/directory/symlink shape change as a removal; and returns an error rather than guessing when a path can be neither confirmed present nor confirmed absent, because a wrong "nothing will be lost" is the exact failure it exists to prevent.
+- The comparison runs against the staged tree that actually lands, not the raw clone: `installer::copy_skill_dir` drops `.git` and every symlink, so comparing against the clone produced real false negatives.
+- Approving is bound to a SHA-256 over the revision and the exact sorted set of paths. The confirming call re-clones, re-stages and recomputes; a set that no longer matches asks again rather than acting on a stale answer. Re-import and relink bind to their own domains.
+- `StagedPathGuard` removes a declined skill's staged directory on drop, and is released only after the swap has succeeded, so a failure between the two cannot leave a `.staged-<uuid>` directory behind for the metadata rebuild to adopt as a new skill.
+- Audit logs record a held-back update as such instead of as a successful no-op.
+- The `manage-skills` skill documents the held-back shape, including that `held_back_removals` is omitted when empty and that no CLI flag accepts it — the field's own doc comment had pointed at a `--force` that `skills update` does not have.
+- DeepSeek Harness paths were read out of `packages/util/home-paths` and `packages/skill/skill-filesystem` rather than taken from its README; its shared `~/.agents/skills` root is registered for discovery only, as with Codex and Copilot.
+- 453 tests pass.
+## [1.33.1] - 2026-08-12
+
+### Release Overview
+- Security fix: a crafted git URL could make an install copy a directory from outside the cloned repository into your library. Update if you install skills from links other people share.
+
+### User-facing
+- **Installing from a git URL can no longer reach outside the repository** — The path part of a `…/tree/<branch>/<path>` URL was joined onto the clone without checking that it stayed inside it, so a URL whose path climbed far enough resolved to an arbitrary directory on your machine, which was then copied into the library and reported as a successful install. Because the library can be backed up to a git remote, content pulled in this way could also leave the machine. The same applies to a skills.sh shorthand whose `@` part contains a path. Both are now refused. This affected the desktop app and the CLI equally.
+- **A git URL pointing at a directory that does not exist is now an error** — It used to fall back to searching the whole repository, which for a repository that groups its skills installed the entire `skills/` container as a single entry. Installing `…/tree/main/artifacts-builder` from a repo whose real path is `skills/web-artifacts-builder` now says so instead of quietly installing 17 unrelated skills as one.
+- **Updates no longer substitute a different directory when a skill moves upstream** — If a skills.sh skill's recorded path was taken over by a container or an unrelated directory, an update copied that over your installed skill. The recorded path is now used only when it still holds a skill; otherwise the skill is looked up at its new home, as it already was when the path disappeared entirely.
+
+### Developer & Governance
+- `resolve_skill_dir` validates both the requested subpath and the directory finally resolved by `find_skill_dir` with `path_guard::is_path_safe`, covering the locator route as well: `parse_skillssh_shorthand` does not constrain the part after `@` to a single path segment, and `find_skill_dir` joins that id onto the checkout in three places.
+- 10 regression tests: `..`, absolute-path and symlink escapes with and without a locator; a missing path with no locator; locator recovery after an upstream move; a locator finding nothing (preserving the #278 assertions); and container enumeration for the preview/confirm install flow.
+## [1.33.0] - 2026-08-12
+
+### Release Overview
+- A skill you wrote locally and later published to git can now be pointed at that repository without being reinstalled, so it starts receiving updates while keeping its tags, presets and deployments.
+
+### User-facing
+- **`skills set-source` re-points an installed skill at a git source in place** — Converting a local skill to a git-backed one previously had no safe path: `install` allocates `<name>-2` and leaves you with a duplicate, `remove` + `install` drops the skill id and with it the tags, preset membership and per-agent deployments, and the desktop app's relink is local-to-local only. The new command updates the skill in place, so everything keyed to its id survives and `update` works from then on.
+- **The re-point refuses to guess** — A `--subpath` that does not exist, is not a skill directory, or resolves outside the checkout is an error, never a silent fallback to scanning the whole repository. `--dry-run` reports what would change without needing `--force`, and content that differs from the library copy is only overwritten with `--force`.
+
+### Developer & Governance
+- `set_git_source_internal` reuses `update_skill_after_reinstall`, so the row is updated by id. The clone runs outside the repo lock and the row is re-read after locking, refusing to apply a decision made against a stale snapshot; identical content skips file work entirely rather than rewriting the central copy for a metadata-only change.
+- Strict subpath resolution is guarded by `path_guard::is_path_safe`, covering absolute paths, `..` traversal and symlinks escaping the checkout, with 7 unit tests.
+- CI: publishing a release now triggers a rebuild of skillsmanager.dev.
+- Documentation: `skills set-source` in both READMEs; demo screenshots refreshed for the 1.32 UI.
+## [1.32.0] - 2026-08-11
+
+### Release Overview
+- Deploying a skill can no longer delete a directory Skills Manager did not create. Every write to an Agent directory now has to prove the target is ours before replacing it, and anything it cannot vouch for is left untouched and reported.
+
+### User-facing
+- **Deployment refuses to overwrite content that is not ours (#363)** — A skill whose name collides with a directory you created yourself was silently deleted, and the operation reported success. Deployment now replaces only an absent target, a link already pointing at the skill, or a deployment the app has a record of. Anything else is left byte-for-byte intact and the reason is shown. Adopt the existing directory into the library, or move it aside, to continue.
+- **`skills export --dest` no longer wipes the destination** — Exporting to a path that already existed deleted it recursively; `--dest ~/Documents` left nothing but a `SKILL.md`. A non-empty destination is now refused, with `--force` to overwrite deliberately.
+- **Turning a skill off keeps content that replaced it** — Undeploy, preset switching, and the Agent toggle deleted whatever the app's records pointed at. If you had replaced a managed skill with your own directory, that directory is now preserved and reported instead of deleted.
+- **Failures explain themselves** — Adding skills from the library, or applying a preset, used to report only "N skills failed". The affected path, the reason, and what to do about it now appear in the message.
+- **Switching an already-deployed skill from symlink to copy mode works** — It previously failed every time with a spurious "infinite recursion" error.
+
+### Developer & Governance
+- `sync_engine::sync_skill` takes an explicit `ReplacePolicy` (`NoClobber` / `Recorded { mode }` / `UserConfirmed`), so all nine call sites must state what they are authorized to destroy. Removal is type-specific, closing the window where an object swapped in after the check could be recursively deleted.
+- Batch deployment preflights every pair before writing anything and pools ownership evidence per target path, so Agents sharing one skills directory deploy correctly while contradictory records refuse.
+- Ownership refusals are reported rather than thrown from `sync_desired_targets`; startup logs them and cannot be blocked from launching by a collision, while explicit user actions surface them as errors.
+- 17 regression tests covering the authorization table, startup behavior, shared skills directories, contradictory records, and preservation on undeploy.
+- Documentation: link the official site at skillsmanager.dev, and correct the supported agent count to 51.
+## [1.31.0] - 2026-08-09
+
+### Release Overview
+- Skills Manager now ships an agent-ready CLI that can manage the shared library, real per-agent deployments, presets, tags, and Agent availability without driving the desktop UI.
+
+### User-facing
+- **Claude Code, Codex, and other agents can manage Skills Manager directly** — The CLI can list and filter skills, inspect deployment status, deploy or undeploy one or several skills, enable or disable Agents, and create, edit, delete, inspect, deploy, or undeploy presets. Tag operations now include set, rename, and guarded deletion.
+- **Preset deployment is additive** — Several presets can be deployed at the same time. Creating a preset or changing its members only organizes the library; it never changes Agent files implicitly. `presets undeploy` without an Agent removes the preset everywhere it actually has target records, including disabled, uninstalled, or no-longer-registered custom Agents.
+- **Automation has safer, machine-readable behavior** — `--json` returns stable error codes, bulk destructive operations support `--dry-run`, preset membership updates are atomic, and deployment commands verify the resulting database rows and filesystem state before reporting success. Successful pairs in a partially failed batch are still recorded accurately.
+- **Standalone CLI downloads join every release** — Release assets now include `skills-manager-cli` binaries for macOS arm64/x64, Windows x64, and Linux x64. The macOS binaries are Developer ID signed with the hardened runtime and accepted by Apple's notarization service.
+
+### Developer & Governance
+- Preset CRUD and membership, tag mutation, and Agent toggles now expose shared internal implementations used by both Tauri commands and the CLI. The desktop app keeps its existing active-preset transitions while CLI organization commands remain side-effect-free.
+- Deployment selection and verification use actual `skill_targets` rows when removing files, so stale deployments remain discoverable after an Agent is disabled or removed. Audits are emitted only for verified pairs that really changed, including successful pairs before a partial-failure response.
+- The release workflow builds the Rust CLI for all four target triples, gives every asset a collision-free platform name, imports the Developer ID certificate into an isolated temporary keychain for standalone macOS CLI signing, verifies the signing identity and hardened runtime, requires an explicit `Accepted` notarization status, and refuses to publish a draft missing any CLI or updater artifact. `release:prepare` now keeps Cargo package and lockfile versions aligned with the app version.
+- The bundled `manage-skills` skill and both READMEs document the CLI installation paths, state model, safe workflows, and the difference between disabling an Agent, undeploying a skill, and undeploying a preset.
+
 ## [1.30.0] - 2026-08-07
 
 ### Release Overview

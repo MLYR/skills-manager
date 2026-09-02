@@ -896,8 +896,7 @@ pub fn run() {
                 }
             });
 
-            // Retention cleanup is privacy-sensitive but not startup-critical;
-            // run it after logger setup without delaying window creation.
+            // 保留 AI 解读启动逻辑：日志保留期清理（隐私敏感，非启动关键路径）。
             let store_for_ai_log_cleanup = store_for_setup.clone();
             tauri::async_runtime::spawn_blocking(move || {
                 match core::ai::logs::cleanup_expired_logs_on_startup(&store_for_ai_log_cleanup) {
@@ -909,11 +908,19 @@ pub fn run() {
                 }
             });
 
-            // AI analysis startup recovery + persistent runner: interrupted
-            // jobs are requeued (attempt counters intact) and the runner begins
-            // claiming confirmed work. Never holds API key material.
+            // 保留 AI 解读启动逻辑：中断任务重排队 + 持久 runner 开始认领已确认任务。
             core::ai::runner::start(store_for_setup.clone(), ai_runtime_for_setup.clone());
 
+            // 上游 v1.36 新功能：将随包发布的 CLI 拷贝到固定路径，供 Agent 调用。
+            // ~15MB 拷贝 + 一次 --version，避免阻塞 UI 线程。
+            tauri::async_runtime::spawn_blocking(|| {
+                let step = Instant::now();
+                core::cli_bridge::ensure_bridge(env!("CARGO_PKG_VERSION"));
+                log::info!(
+                    "startup: cli bridge step done in {} ms",
+                    step.elapsed().as_millis()
+                );
+            });
             let step = Instant::now();
             if is_tray_icon_enabled(&store_for_setup) {
                 ensure_tray_icon(app.handle())?;

@@ -304,7 +304,14 @@ fn import_agent_local_skill_to_center(
         // sync path keeps the target consistent with every other managed skill:
         // sync_engine owns the on-disk artifact, so later unsync/scenario-sync
         // touch only that managed artifact, never the user's source.
-        scenario_service::sync_single_skill_to_tool(store, &existing.id, agent)?;
+        // AdoptExisting: the directory being replaced is the very one the user
+        // asked us to take over, and it has no target row yet (#363).
+        scenario_service::sync_single_skill_to_tool(
+            store,
+            &existing.id,
+            agent,
+            scenario_service::DeployIntent::AdoptExisting,
+        )?;
         return Ok(());
     }
 
@@ -341,7 +348,12 @@ fn import_agent_local_skill_to_center(
     // central directory: `install_from_local` may have de-duplicated onto a
     // directory shared with another skill, and removing it could corrupt that
     // skill — an orphaned dir is harmless by comparison.
-    if let Err(err) = scenario_service::sync_single_skill_to_tool(store, &skill_record.id, agent) {
+    if let Err(err) = scenario_service::sync_single_skill_to_tool(
+        store,
+        &skill_record.id,
+        agent,
+        scenario_service::DeployIntent::AdoptExisting,
+    ) {
         let _ = store.delete_skill(&skill_record.id);
         return Err(err);
     }
@@ -553,7 +565,15 @@ pub fn backfill_stranded_agent_targets(store: &SkillStore) -> usize {
                 continue;
             }
 
-            match scenario_service::sync_single_skill_to_tool(store, &matched.id, &adapter.key) {
+            // AdoptExisting: this repairs a target row that was never written,
+            // so no record vouches for the directory. The hash equality check
+            // above is what makes overwriting it safe.
+            match scenario_service::sync_single_skill_to_tool(
+                store,
+                &matched.id,
+                &adapter.key,
+                scenario_service::DeployIntent::AdoptExisting,
+            ) {
                 Ok(()) => {
                     repaired += 1;
                     log::info!(
@@ -634,7 +654,16 @@ fn update_agent_local_skill_from_center(
     let source = PathBuf::from(&managed.central_path);
     let configured_mode = store.get_setting("sync_mode").map_err(AppError::db)?;
     let mode = sync_engine::sync_mode_for_tool(agent, configured_mode.as_deref());
-    sync_engine::sync_skill(&source, &target_path, mode).map_err(AppError::io)?;
+    // UserConfirmed: an explicit "update this agent copy from center" on a
+    // skill the user picked, already guarded by the project_newer check above.
+    // The target is a discovered agent skill dir, which carries no target row.
+    sync_engine::sync_skill(
+        &source,
+        &target_path,
+        mode,
+        sync_engine::ReplacePolicy::UserConfirmed,
+    )
+    .map_err(AppError::io)?;
     Ok(())
 }
 
@@ -1364,6 +1393,17 @@ mod tests {
             "---\nname: local-tool\ndescription: Agent copy\n---\nagent newer\n",
         )
         .unwrap();
+        // "Newer" has to be true on disk. Both copies are written in the same
+        // instant here, and the guard compares real mtimes on both sides — a
+        // stale `updated_at` on the center row no longer stands in for age.
+        let local_file = std::fs::File::options()
+            .write(true)
+            .open(skill_dir.join("SKILL.md"))
+            .unwrap();
+        let newer = std::time::SystemTime::now() + std::time::Duration::from_secs(60);
+        local_file
+            .set_times(std::fs::FileTimes::new().set_modified(newer))
+            .unwrap();
 
         store
             .set_setting(

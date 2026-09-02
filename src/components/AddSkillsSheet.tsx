@@ -331,14 +331,16 @@ function AddSkillsSheetBody({ onClose, target, managedSkills, onInstalled }: Pro
     setInstalling(true);
     let ok = 0;
     let failed = 0;
+    const failures: string[] = [];
     try {
       if (target.kind === "global") {
         for (const id of selectableSelected) {
           try {
             await api.syncSkillToTool(id, target.agentKey);
             ok++;
-          } catch {
+          } catch (e) {
             failed++;
+            failures.push(getErrorMessage(e, t("common.error")));
           }
         }
       } else {
@@ -356,8 +358,9 @@ function AddSkillsSheetBody({ onClose, target, managedSkills, onInstalled }: Pro
             if (agents.length === 0) continue;
             await api.exportSkillToProject(id, target.projectId, agents);
             ok++;
-          } catch {
+          } catch (e) {
             failed++;
+            failures.push(getErrorMessage(e, t("common.error")));
           }
         }
       }
@@ -366,7 +369,17 @@ function AddSkillsSheetBody({ onClose, target, managedSkills, onInstalled }: Pro
         setSelectedIds(new Set());
       }
       if (failed > 0) {
-        toast.error(t("addFromLibrary.toastFailed", { count: failed }));
+        // Surface why. A refusal carries the path it protected and what to do
+        // about it (#363); collapsing that to a bare count leaves the user with
+        // no idea which skill failed or how to resolve it.
+        const detail = failures[0];
+        toast.error(
+          failed === 1 && detail
+            ? detail
+            : [t("addFromLibrary.toastFailed", { count: failed }), detail]
+                .filter(Boolean)
+                .join(" — "),
+        );
       }
       await onInstalled();
       if (failed === 0) onClose();

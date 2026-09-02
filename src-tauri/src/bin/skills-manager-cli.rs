@@ -2,12 +2,12 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
-use anyhow::{anyhow, bail};
-use app_lib::commands::skills as cmd;
+use anyhow::{Context, anyhow, bail};
+use app_lib::commands::{presets as preset_cmd, skills as cmd, tools as tool_cmd};
 use app_lib::core::{
-    app_state, central_repo, error::AppError, git_backup, git_fetcher, installer, merge,
-    repo_lock::RepoLock, scenario_service, skill_metadata, skill_store::SkillStore, skillssh_api,
-    sync_engine, sync_metadata, tool_service,
+    app_state, audit_log::AuditDraft, central_repo, error::AppError, git_backup, git_fetcher,
+    installer, merge, repo_lock::RepoLock, scenario_service, skill_metadata,
+    skill_store::SkillStore, skillssh_api, sync_engine, sync_metadata, tool_adapters, tool_service,
 };
 use clap::{Args, Parser, Subcommand};
 use serde::Serialize;
@@ -27,6 +27,7 @@ struct Cli {
 #[derive(Subcommand, Debug)]
 enum Commands {
     Repo(RepoArgs),
+    #[command(name = "agents", visible_alias = "tools")]
     Tools(ToolsArgs),
     Skills(SkillsArgs),
     #[command(alias = "scenarios")]
@@ -56,6 +57,14 @@ struct ToolsArgs {
 #[derive(Subcommand, Debug)]
 enum ToolsCommand {
     List,
+    Enable {
+        #[arg(required = true)]
+        agents: Vec<String>,
+    },
+    Disable {
+        #[arg(required = true)]
+        agents: Vec<String>,
+    },
 }
 
 #[derive(Args, Debug)]
@@ -66,7 +75,22 @@ struct SkillsArgs {
 
 #[derive(Subcommand, Debug)]
 enum SkillsCommand {
-    List,
+    List {
+        #[arg(long)]
+        query: Option<String>,
+        #[arg(long = "tag", conflicts_with = "untagged")]
+        tags: Vec<String>,
+        #[arg(long)]
+        preset: Option<String>,
+        #[arg(long, value_name = "AGENT")]
+        deployed_to: Option<String>,
+        #[arg(long)]
+        untagged: bool,
+        #[arg(long)]
+        no_preset: bool,
+        #[arg(long)]
+        source: Option<String>,
+    },
     Show {
         reference: String,
     },
@@ -74,6 +98,10 @@ enum SkillsCommand {
         reference: String,
         #[arg(long)]
         dest: PathBuf,
+        /// Overwrite the destination if it already exists. Without this, an
+        /// existing destination is left untouched and the command fails.
+        #[arg(long)]
+        force: bool,
     },
     Install {
         /// Ref: local path, git URL, or owner/repo[@skill] / owner/repo/skill
@@ -113,13 +141,35 @@ enum SkillsCommand {
         #[arg(long)]
         dry_run: bool,
     },
-    /// Deprecated no-op: use presets add-skill to enable a skill in a preset.
+    /// Deprecated compatibility command: use skills deploy.
     Enable {
         references: Vec<String>,
     },
-    /// Deprecated no-op: use presets remove-skill to disable a skill in a preset.
+    /// Deprecated compatibility command: use skills undeploy.
     Disable {
         references: Vec<String>,
+    },
+    /// Deploy library skills to one or more agents' global skill directories.
+    Deploy {
+        #[arg(required = true)]
+        references: Vec<String>,
+        #[arg(long = "agent", alias = "to", value_name = "AGENT", required = true)]
+        agents: Vec<String>,
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Remove managed deployments from one or more agents.
+    Undeploy {
+        #[arg(required = true)]
+        references: Vec<String>,
+        #[arg(long = "agent", alias = "from", value_name = "AGENT", required = true)]
+        agents: Vec<String>,
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Show preset membership and actual per-agent deployment state.
+    Status {
+        reference: String,
     },
     Sync {
         /// Preset id or name (default = current active preset)
@@ -135,6 +185,29 @@ enum SkillsCommand {
         query: String,
         #[arg(long)]
         limit: Option<usize>,
+    },
+    /// Re-point an installed skill at a git source in place, keeping its id,
+    /// tags, preset membership and deployments.
+    SetSource {
+        /// Skill ref (id / name / dir basename / central path)
+        reference: String,
+        /// Git URL or owner/repo, optionally a GitHub tree URL encoding branch and subpath
+        #[arg(long = "git-url")]
+        git_url: String,
+        /// Subpath inside the repo. Pass "" if the skill is at the repo root.
+        /// Overrides a subpath encoded in the URL.
+        #[arg(long)]
+        subpath: Option<String>,
+        /// Branch to track. Overrides a branch encoded in the URL.
+        #[arg(long)]
+        branch: Option<String>,
+        /// Overwrite the central copy when the new source's content differs.
+        /// Without this, a content difference is refused.
+        #[arg(long)]
+        force: bool,
+        /// Resolve and compare without writing anything.
+        #[arg(long)]
+        dry_run: bool,
     },
     Adopt {
         /// Agent skill dirs to scan (e.g. ~/.claude/skills), or a single skill dir
@@ -169,6 +242,21 @@ enum TagCommand {
         reference: String,
         tags: Vec<String>,
     },
+    Set {
+        reference: String,
+        tags: Vec<String>,
+    },
+    Rename {
+        old_name: String,
+        new_name: String,
+    },
+    Delete {
+        name: String,
+        #[arg(long, short)]
+        yes: bool,
+        #[arg(long)]
+        dry_run: bool,
+    },
     List {
         reference: Option<String>,
     },
@@ -184,23 +272,74 @@ struct PresetArgs {
 enum PresetCommand {
     List,
     Current,
+    Show {
+        reference: String,
+    },
+    Create {
+        name: String,
+        #[arg(long)]
+        description: Option<String>,
+        #[arg(long)]
+        icon: Option<String>,
+    },
+    Update {
+        reference: String,
+        #[arg(long)]
+        name: Option<String>,
+        #[arg(long)]
+        description: Option<String>,
+        #[arg(long)]
+        icon: Option<String>,
+    },
+    Delete {
+        reference: String,
+        #[arg(long, short)]
+        yes: bool,
+        #[arg(long)]
+        dry_run: bool,
+    },
     Preview {
         reference: String,
     },
-    #[command(alias = "activate", alias = "enable", alias = "start", alias = "open")]
+    /// Legacy exclusive switch: replaces the current active preset.
     Apply {
         reference: String,
     },
-    #[command(alias = "disable", alias = "stop", alias = "close", alias = "off")]
+    /// Legacy exclusive close operation. Prefer undeploy for additive presets.
     Deactivate {
         reference: String,
     },
+    /// Additively deploy this preset without removing other deployed presets.
+    #[command(alias = "activate", alias = "enable", alias = "start", alias = "open")]
+    Deploy {
+        reference: String,
+        #[arg(long = "agent", value_name = "AGENT")]
+        agents: Vec<String>,
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Remove this preset's deployed pairs without changing its membership.
+    #[command(alias = "disable", alias = "stop", alias = "close", alias = "off")]
+    Undeploy {
+        reference: String,
+        #[arg(long = "agent", value_name = "AGENT")]
+        agents: Vec<String>,
+        #[arg(long)]
+        dry_run: bool,
+    },
+    Status {
+        reference: String,
+        #[arg(long = "agent", value_name = "AGENT")]
+        agents: Vec<String>,
+    },
     AddSkill {
         preset: String,
+        #[arg(required = true)]
         skills: Vec<String>,
     },
     RemoveSkill {
         preset: String,
+        #[arg(required = true)]
         skills: Vec<String>,
     },
 }
@@ -260,7 +399,55 @@ struct SkillSummary {
     tags: Vec<String>,
     source_type: String,
     source_ref: Option<String>,
+    preset_ids: Vec<String>,
     presets: Vec<String>,
+    deployed_to: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct AgentMutationReport {
+    agent: String,
+    enabled: bool,
+    changed: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct SkillAgentStatus {
+    key: String,
+    display_name: String,
+    installed: bool,
+    globally_enabled: bool,
+    deployed: bool,
+    target_path: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct SkillStatusReport {
+    #[serde(flatten)]
+    skill: SkillSummary,
+    agents: Vec<SkillAgentStatus>,
+}
+
+#[derive(Debug, Serialize)]
+struct SkillDeploymentReport {
+    ok: bool,
+    action: String,
+    agents: Vec<String>,
+    dry_run: bool,
+    skill_count: usize,
+    pair_count: usize,
+    changed_pairs: usize,
+    skills: Vec<String>,
+    /// Paths left in place because they no longer match the deployment we
+    /// recorded — someone else's content now lives there (#363).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    preserved: Vec<String>,
+}
+
+struct DeploymentVerification {
+    succeeded: std::collections::HashSet<(String, String)>,
+    failures: Vec<String>,
+    preserved: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -284,6 +471,46 @@ struct PresetInfo {
 }
 
 #[derive(Debug, Serialize)]
+struct PresetAgentStatus {
+    key: String,
+    display_name: String,
+    deployed: usize,
+    total: usize,
+    status: String,
+}
+
+#[derive(Debug, Serialize)]
+struct PresetStatusReport {
+    preset: PresetInfo,
+    agents: Vec<PresetAgentStatus>,
+}
+
+#[derive(Debug, Serialize)]
+struct PresetDeploymentReport {
+    ok: bool,
+    action: String,
+    preset_id: String,
+    preset_name: String,
+    agents: Vec<String>,
+    dry_run: bool,
+    skill_count: usize,
+    pair_count: usize,
+    changed_pairs: usize,
+    /// See [`SkillDeploymentReport::preserved`].
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    preserved: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct PresetDeleteReport {
+    ok: bool,
+    preset_id: String,
+    preset_name: String,
+    dry_run: bool,
+    deleted: bool,
+}
+
+#[derive(Debug, Serialize)]
 struct InstallReport {
     ok: bool,
     skill_id: String,
@@ -301,6 +528,13 @@ struct UpdateReport {
     source_type: String,
     refreshed: bool,
     error: Option<String>,
+    /// Present when the update was held back because it would have removed
+    /// these paths (#256). Nothing changed, and the CLI offers no way to
+    /// accept: approving means seeing the list, which needs a person, so it
+    /// only exists in the app. A bare `refreshed: false` would read as
+    /// "already up to date".
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    held_back_removals: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -385,6 +619,16 @@ struct TagReport {
 }
 
 #[derive(Debug, Serialize)]
+struct GlobalTagReport {
+    ok: bool,
+    tag: String,
+    renamed_to: Option<String>,
+    affected_skills: usize,
+    dry_run: bool,
+    deleted: bool,
+}
+
+#[derive(Debug, Serialize)]
 struct PresetMembershipReport {
     preset_id: String,
     preset_name: String,
@@ -418,7 +662,13 @@ fn main() {
                 e.exit();
             }
             if json {
-                let envelope = serde_json::json!({"ok": false, "error": e.to_string()});
+                let message = e.to_string();
+                let envelope = serde_json::json!({
+                    "ok": false,
+                    "code": "INVALID_ARGUMENT",
+                    "message": message,
+                    "error": message,
+                });
                 eprintln!("{}", serde_json::to_string(&envelope).unwrap());
                 std::process::exit(2);
             }
@@ -428,8 +678,7 @@ fn main() {
 
     if let Err(err) = run(cli) {
         if json {
-            let envelope = serde_json::json!({"ok": false, "error": format!("{err:#}")});
-            eprintln!("{}", serde_json::to_string(&envelope).unwrap());
+            eprintln!("{}", serde_json::to_string(&error_envelope(&err)).unwrap());
         } else {
             eprintln!("error: {err:#}");
         }
@@ -491,18 +740,93 @@ fn repo_status(store: &SkillStore) -> RepoStatus {
 fn run_tools(args: ToolsArgs, store: &SkillStore, json: bool) -> anyhow::Result<()> {
     match args.command {
         ToolsCommand::List => print_json(&tool_service::list_tool_info(store), json),
+        ToolsCommand::Enable { agents } => {
+            print_json(&run_set_agents_enabled(store, &agents, true)?, json)
+        }
+        ToolsCommand::Disable { agents } => {
+            print_json(&run_set_agents_enabled(store, &agents, false)?, json)
+        }
     }
     Ok(())
+}
+
+fn run_set_agents_enabled(
+    store: &SkillStore,
+    agents: &[String],
+    enabled: bool,
+) -> anyhow::Result<Vec<AgentMutationReport>> {
+    if agents.is_empty() {
+        bail!("no agent key provided");
+    }
+    let infos = tool_service::list_tool_info(store);
+    let mut resolved = Vec::new();
+    for key in agents {
+        let info = infos
+            .iter()
+            .find(|info| info.key == *key)
+            .ok_or_else(|| anyhow!("unknown agent: {key}"))?;
+        if !resolved
+            .iter()
+            .any(|existing: &String| existing == &info.key)
+        {
+            resolved.push(info.key.clone());
+        }
+    }
+
+    let mut reports = Vec::new();
+    for key in resolved {
+        let before = infos.iter().find(|info| info.key == key).unwrap().enabled;
+        tool_cmd::set_tool_enabled_internal(store, &key, enabled).map_err(map_app_err)?;
+        store.log_audit(
+            AuditDraft::new(if enabled {
+                "enable_agent"
+            } else {
+                "disable_agent"
+            })
+            .tool(key.clone())
+            .ok(),
+        );
+        reports.push(AgentMutationReport {
+            agent: key,
+            enabled,
+            changed: before != enabled,
+        });
+    }
+    Ok(reports)
 }
 
 // ── skills ────────────────────────────────────────────────────────────────
 
 fn run_skills(args: SkillsArgs, store: &SkillStore, json: bool) -> anyhow::Result<()> {
     match args.command {
-        SkillsCommand::List => print_json(&list_skills(store)?, json),
+        SkillsCommand::List {
+            query,
+            tags,
+            preset,
+            deployed_to,
+            untagged,
+            no_preset,
+            source,
+        } => print_json(
+            &list_skills_filtered(
+                store,
+                query.as_deref(),
+                &tags,
+                preset.as_deref(),
+                deployed_to.as_deref(),
+                untagged,
+                no_preset,
+                source.as_deref(),
+            )?,
+            json,
+        ),
         SkillsCommand::Show { reference } => print_json(&show_skill(store, &reference)?, json),
-        SkillsCommand::Export { reference, dest } => {
-            let result = export_skill(store, &reference, &dest)?;
+        SkillsCommand::Export {
+            reference,
+            dest,
+            force,
+        } => {
+            let result = export_skill(store, &reference, &dest, force)?;
             print_json(
                 &serde_json::json!({"ok": true, "destination": result}),
                 json,
@@ -556,6 +880,25 @@ fn run_skills(args: SkillsArgs, store: &SkillStore, json: bool) -> anyhow::Resul
             let reports = run_deprecated_set_enabled(store, &references, false)?;
             print_json(&reports, json);
         }
+        SkillsCommand::Deploy {
+            references,
+            agents,
+            dry_run,
+        } => {
+            let report = run_skill_deployment(store, &references, &agents, true, dry_run)?;
+            print_json(&report, json);
+        }
+        SkillsCommand::Undeploy {
+            references,
+            agents,
+            dry_run,
+        } => {
+            let report = run_skill_deployment(store, &references, &agents, false, dry_run)?;
+            print_json(&report, json);
+        }
+        SkillsCommand::Status { reference } => {
+            print_json(&skill_status(store, &reference)?, json);
+        }
         SkillsCommand::Sync {
             preset,
             tool,
@@ -567,6 +910,28 @@ fn run_skills(args: SkillsArgs, store: &SkillStore, json: bool) -> anyhow::Resul
         SkillsCommand::Search { query, limit } => {
             let hits = run_search(store, &query, limit)?;
             print_json(&hits, json);
+        }
+        SkillsCommand::SetSource {
+            reference,
+            git_url,
+            subpath,
+            branch,
+            force,
+            dry_run,
+        } => {
+            let skill = resolve_skill(store, &reference)?;
+            let report = cmd::set_git_source_internal(
+                store,
+                &skill.id,
+                &git_url,
+                subpath.as_deref(),
+                branch.as_deref(),
+                store.proxy_url().as_deref(),
+                force,
+                dry_run,
+            )
+            .map_err(map_app_err)?;
+            print_json(&report, json);
         }
         SkillsCommand::Adopt {
             paths,
@@ -590,17 +955,25 @@ fn run_skills(args: SkillsArgs, store: &SkillStore, json: bool) -> anyhow::Resul
 
 fn list_skills(store: &SkillStore) -> anyhow::Result<Vec<SkillSummary>> {
     let tags_map = store.get_tags_map()?;
+    let targets = store.get_all_targets()?;
     let scenarios = store.get_all_scenarios()?;
     let scenario_lookup: std::collections::HashMap<String, String> =
         scenarios.into_iter().map(|s| (s.id, s.name)).collect();
 
     let mut items = Vec::new();
     for skill in store.get_all_skills()? {
-        let preset_names = store
-            .get_scenarios_for_skill(&skill.id)?
-            .into_iter()
-            .filter_map(|id| scenario_lookup.get(&id).cloned())
+        let preset_ids = store.get_scenarios_for_skill(&skill.id)?;
+        let preset_names = preset_ids
+            .iter()
+            .filter_map(|id| scenario_lookup.get(id).cloned())
             .collect();
+        let mut deployed_to: Vec<String> = targets
+            .iter()
+            .filter(|target| target.skill_id == skill.id && target.status == "ok")
+            .map(|target| target.tool.clone())
+            .collect();
+        deployed_to.sort();
+        deployed_to.dedup();
         items.push(SkillSummary {
             id: skill.id.clone(),
             name: skill.name.clone(),
@@ -610,10 +983,86 @@ fn list_skills(store: &SkillStore) -> anyhow::Result<Vec<SkillSummary>> {
             tags: tags_map.get(&skill.id).cloned().unwrap_or_default(),
             source_type: skill.source_type.clone(),
             source_ref: skill.source_ref.clone(),
+            preset_ids,
             presets: preset_names,
+            deployed_to,
         });
     }
     Ok(items)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn list_skills_filtered(
+    store: &SkillStore,
+    query: Option<&str>,
+    tags: &[String],
+    preset_ref: Option<&str>,
+    deployed_to: Option<&str>,
+    untagged: bool,
+    no_preset: bool,
+    source: Option<&str>,
+) -> anyhow::Result<Vec<SkillSummary>> {
+    let preset_id = preset_ref
+        .map(|reference| resolve_scenario(store, reference).map(|preset| preset.id))
+        .transpose()?;
+    if let Some(agent) = deployed_to {
+        if tool_adapters::find_adapter_with_store(store, agent).is_none() {
+            bail!("unknown agent: {agent}");
+        }
+    }
+    let query = query
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_lowercase);
+    let source = source
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_lowercase);
+    let wanted_tags: Vec<String> = tags
+        .iter()
+        .map(|tag| tag.trim())
+        .filter(|tag| !tag.is_empty())
+        .map(str::to_string)
+        .collect();
+
+    Ok(list_skills(store)?
+        .into_iter()
+        .filter(|skill| {
+            query.as_ref().map_or(true, |needle| {
+                skill.name.to_lowercase().contains(needle)
+                    || skill
+                        .description
+                        .as_deref()
+                        .unwrap_or_default()
+                        .to_lowercase()
+                        .contains(needle)
+            })
+        })
+        .filter(|skill| wanted_tags.iter().all(|tag| skill.tags.contains(tag)))
+        .filter(|skill| !untagged || skill.tags.is_empty())
+        .filter(|skill| !no_preset || skill.preset_ids.is_empty())
+        .filter(|skill| {
+            preset_id
+                .as_ref()
+                .map_or(true, |id| skill.preset_ids.contains(id))
+        })
+        .filter(|skill| {
+            deployed_to.as_ref().map_or(true, |agent| {
+                skill.deployed_to.iter().any(|key| key == agent)
+            })
+        })
+        .filter(|skill| {
+            source.as_ref().map_or(true, |needle| {
+                skill.source_type.to_lowercase().contains(needle)
+                    || skill
+                        .source_ref
+                        .as_deref()
+                        .unwrap_or_default()
+                        .to_lowercase()
+                        .contains(needle)
+            })
+        })
+        .collect())
 }
 
 fn show_skill(store: &SkillStore, reference: &str) -> anyhow::Result<SkillDetail> {
@@ -639,9 +1088,294 @@ fn show_skill(store: &SkillStore, reference: &str) -> anyhow::Result<SkillDetail
     })
 }
 
-fn export_skill(store: &SkillStore, reference: &str, dest: &Path) -> anyhow::Result<String> {
+fn skill_status(store: &SkillStore, reference: &str) -> anyhow::Result<SkillStatusReport> {
     let skill = resolve_skill(store, reference)?;
-    sync_engine::sync_skill(Path::new(&skill.central_path), dest, sync_engine::SyncMode::Copy)?;
+    let summary = list_skills(store)?
+        .into_iter()
+        .find(|item| item.id == skill.id)
+        .ok_or_else(|| anyhow!("skill summary missing"))?;
+    let targets = store.get_targets_for_skill(&skill.id)?;
+    let mut agents: Vec<SkillAgentStatus> = tool_service::list_tool_info(store)
+        .into_iter()
+        .map(|agent| {
+            let target = targets.iter().find(|target| target.tool == agent.key);
+            SkillAgentStatus {
+                key: agent.key,
+                display_name: agent.display_name,
+                installed: agent.installed,
+                globally_enabled: agent.enabled,
+                deployed: target.is_some_and(|target| target.status == "ok"),
+                target_path: target.map(|target| target.target_path.clone()),
+            }
+        })
+        .collect();
+    let mut unregistered_targets: Vec<_> = targets
+        .iter()
+        .filter(|target| !agents.iter().any(|agent| agent.key == target.tool))
+        .collect();
+    unregistered_targets.sort_by(|left, right| left.tool.cmp(&right.tool));
+    for target in unregistered_targets {
+        agents.push(SkillAgentStatus {
+            key: target.tool.clone(),
+            display_name: target.tool.clone(),
+            installed: false,
+            globally_enabled: false,
+            deployed: target.status == "ok",
+            target_path: Some(target.target_path.clone()),
+        });
+    }
+    Ok(SkillStatusReport {
+        skill: summary,
+        agents,
+    })
+}
+
+fn resolve_skill_references(
+    store: &SkillStore,
+    references: &[String],
+) -> anyhow::Result<Vec<app_lib::core::skill_store::SkillRecord>> {
+    if references.is_empty() {
+        bail!("no skill ref provided");
+    }
+    let mut skills = Vec::new();
+    for reference in references {
+        let skill = resolve_skill(store, reference)?;
+        if !skills
+            .iter()
+            .any(|existing: &app_lib::core::skill_store::SkillRecord| existing.id == skill.id)
+        {
+            skills.push(skill);
+        }
+    }
+    Ok(skills)
+}
+
+fn run_skill_deployment(
+    store: &SkillStore,
+    references: &[String],
+    requested_agents: &[String],
+    deploy: bool,
+    dry_run: bool,
+) -> anyhow::Result<SkillDeploymentReport> {
+    let skills = resolve_skill_references(store, references)?;
+    if requested_agents.is_empty() {
+        bail!("no agent key provided");
+    }
+    let existing_targets = store.get_all_targets()?;
+    let skill_ids: Vec<String> = skills.iter().map(|skill| skill.id.clone()).collect();
+    let agent_keys = if deploy {
+        select_preset_agents(store, requested_agents, true)?
+            .into_iter()
+            .map(|agent| agent.key)
+            .collect()
+    } else {
+        select_agent_keys_for_removal(store, requested_agents, &skill_ids, &existing_targets)?
+    };
+    let pair_count = skills.len() * agent_keys.len();
+    let existing: std::collections::HashSet<(String, String)> = existing_targets
+        .iter()
+        .filter(|target| !deploy || target.status == "ok")
+        .map(|target| (target.skill_id.clone(), target.tool.clone()))
+        .collect();
+    let changed: std::collections::HashSet<(String, String)> = skills
+        .iter()
+        .flat_map(|skill| {
+            agent_keys
+                .iter()
+                .map(move |agent| (skill.id.clone(), agent.clone()))
+        })
+        .filter(|pair| {
+            let present = existing.contains(pair);
+            if deploy {
+                !present
+            } else {
+                present
+            }
+        })
+        .collect();
+    let changed_pairs = changed.len();
+
+    let mut preserved: Vec<String> = Vec::new();
+    if !dry_run {
+        scenario_service::apply_skills_to_tools(
+            store,
+            &skill_ids,
+            &agent_keys,
+            if deploy {
+                scenario_service::BatchApplyMode::Add
+            } else {
+                scenario_service::BatchApplyMode::Remove
+            },
+        )
+        .map_err(map_app_err)?;
+        let verification =
+            verify_deployment_state(store, &skill_ids, &agent_keys, deploy, &existing_targets)?;
+        for skill in &skills {
+            for agent in &agent_keys {
+                if verification
+                    .succeeded
+                    .contains(&(skill.id.clone(), agent.clone()))
+                    && changed.contains(&(skill.id.clone(), agent.clone()))
+                {
+                    store.log_audit(
+                        AuditDraft::new(if deploy { "deploy" } else { "undeploy" })
+                            .skill(skill.id.clone(), skill.name.clone())
+                            .tool(agent.clone())
+                            .ok(),
+                    );
+                }
+            }
+        }
+        preserved = verification.preserved.clone();
+        if !verification.failures.is_empty() {
+            bail!(
+                "deployment incomplete: {} pair(s) verified, {} verification issue(s): {}",
+                verification.succeeded.len(),
+                verification.failures.len(),
+                verification.failures.join("; ")
+            );
+        }
+    }
+
+    Ok(SkillDeploymentReport {
+        ok: true,
+        action: if deploy { "deploy" } else { "undeploy" }.to_string(),
+        agents: agent_keys,
+        dry_run,
+        skill_count: skills.len(),
+        pair_count,
+        changed_pairs,
+        skills: skills.into_iter().map(|skill| skill.name).collect(),
+        preserved,
+    })
+}
+
+fn verify_deployment_state(
+    store: &SkillStore,
+    skill_ids: &[String],
+    agent_keys: &[String],
+    deployed: bool,
+    previous_targets: &[app_lib::core::skill_store::SkillTargetRecord],
+) -> anyhow::Result<DeploymentVerification> {
+    let current_targets = store.get_all_targets()?;
+    let mut failures = Vec::new();
+    let mut preserved = Vec::new();
+    let mut succeeded = std::collections::HashSet::new();
+
+    for skill_id in skill_ids {
+        for agent_key in agent_keys {
+            let current = current_targets
+                .iter()
+                .find(|target| target.skill_id == *skill_id && target.tool == *agent_key);
+            if deployed {
+                match current.filter(|target| target.status == "ok") {
+                    Some(target) => {
+                        if let Err(error) = std::fs::symlink_metadata(&target.target_path) {
+                            failures.push(format!(
+                                "{skill_id}@{agent_key}: target is missing ({error})"
+                            ));
+                        } else {
+                            succeeded.insert((skill_id.clone(), agent_key.clone()));
+                        }
+                    }
+                    None => {
+                        failures.push(format!("{skill_id}@{agent_key}: target was not created"))
+                    }
+                }
+                continue;
+            }
+
+            if current.is_some() {
+                failures.push(format!(
+                    "{skill_id}@{agent_key}: target record still exists"
+                ));
+                continue;
+            }
+
+            let mut pair_succeeded = true;
+            for previous in previous_targets
+                .iter()
+                .filter(|target| target.skill_id == *skill_id && target.tool == *agent_key)
+            {
+                let still_referenced = current_targets
+                    .iter()
+                    .any(|target| target.target_path == previous.target_path);
+                if !still_referenced {
+                    match std::fs::symlink_metadata(&previous.target_path) {
+                        Ok(_) => {
+                            // A path that survived undeploy is a failure only
+                            // if it is still our deployment. If something else
+                            // took it over, keeping it was the correct call and
+                            // reporting it as a failure would train users to
+                            // ignore the warning (#363).
+                            let preserved_deliberately = !sync_engine::matches_recorded_deployment(
+                                Path::new(&previous.target_path),
+                                &previous.mode,
+                            )
+                            .unwrap_or(true);
+                            if preserved_deliberately {
+                                preserved.push(previous.target_path.clone());
+                            } else {
+                                pair_succeeded = false;
+                                failures.push(format!(
+                                    "{skill_id}@{agent_key}: target path still exists"
+                                ));
+                            }
+                        }
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                        Err(error) => {
+                            pair_succeeded = false;
+                            failures.push(format!(
+                                "{skill_id}@{agent_key}: cannot verify removal ({error})"
+                            ));
+                        }
+                    }
+                }
+            }
+            if pair_succeeded {
+                succeeded.insert((skill_id.clone(), agent_key.clone()));
+            }
+        }
+    }
+
+    Ok(DeploymentVerification {
+        succeeded,
+        failures,
+        preserved,
+    })
+}
+
+fn export_skill(
+    store: &SkillStore,
+    reference: &str,
+    dest: &Path,
+    force: bool,
+) -> anyhow::Result<String> {
+    let skill = resolve_skill(store, reference)?;
+    let source = PathBuf::from(&skill.central_path);
+
+    // `dest` is an arbitrary user-supplied path, so an unguarded export is a
+    // recursive delete of whatever they typed (#363) — `--dest ~/Documents`
+    // used to wipe it and leave a SKILL.md. Nothing at an export destination
+    // is ever "ours", so overwriting has to be asked for explicitly.
+    if !force {
+        let state = sync_engine::classify_target(dest, Some(&source))
+            .with_context(|| format!("Cannot inspect export destination {}", dest.display()))?;
+        if state != sync_engine::TargetState::Absent {
+            bail!(
+                "Export destination {} already exists; refusing to overwrite it. \
+                 Choose a path that does not exist, or pass --force to replace it.",
+                dest.display()
+            );
+        }
+    }
+
+    let policy = if force {
+        sync_engine::ReplacePolicy::UserConfirmed
+    } else {
+        sync_engine::ReplacePolicy::NoClobber
+    };
+    sync_engine::sync_skill(&source, dest, sync_engine::SyncMode::Copy, policy)?;
     Ok(dest.to_string_lossy().to_string())
 }
 
@@ -734,7 +1468,9 @@ fn classify_ref(
 fn is_skillssh_shorthand(s: &str) -> bool {
     // owner/repo, owner/repo/skill, owner/repo@skill
     fn seg_ok(s: &str) -> bool {
-        !s.is_empty() && s.chars().all(|c| c.is_alphanumeric() || matches!(c, '_' | '.' | '-'))
+        !s.is_empty()
+            && s.chars()
+                .all(|c| c.is_alphanumeric() || matches!(c, '_' | '.' | '-'))
     }
     let (head, _at_skill) = match s.split_once('@') {
         Some((h, t)) if seg_ok(t) => (h, Some(t)),
@@ -745,10 +1481,7 @@ fn is_skillssh_shorthand(s: &str) -> bool {
     (parts.len() == 2 || parts.len() == 3) && parts.iter().all(|p| seg_ok(p))
 }
 
-fn resolve_sync_target(
-    store: &SkillStore,
-    target: &SyncTarget,
-) -> anyhow::Result<Option<String>> {
+fn resolve_sync_target(store: &SkillStore, target: &SyncTarget) -> anyhow::Result<Option<String>> {
     match target {
         SyncTarget::None => Ok(None),
         SyncTarget::Active => Ok(store.get_active_scenario_id()?),
@@ -772,9 +1505,7 @@ fn run_install(
     let (skill_id, install_name, central_path, source_type) = match kind {
         InstallKind::Local => install_local_action(store, reference, name, preset_id.as_deref())?,
         InstallKind::Git => install_git_action(store, reference, name, preset_id.as_deref())?,
-        InstallKind::Skillssh => {
-            install_skillssh_action(store, reference, preset_id.as_deref())?
-        }
+        InstallKind::Skillssh => install_skillssh_action(store, reference, preset_id.as_deref())?,
     };
 
     Ok(InstallReport {
@@ -813,9 +1544,8 @@ fn install_local_action(
     };
     let central_path = result.central_path.to_string_lossy().to_string();
     let install_name = result.name.clone();
-    let skill_id =
-        cmd::store_installed_skill_unlocked(store, &result, &metadata, active_scenario)
-            .map_err(map_app_err)?;
+    let skill_id = cmd::store_installed_skill_unlocked(store, &result, &metadata, active_scenario)
+        .map_err(map_app_err)?;
     Ok((skill_id, install_name, central_path, "local".to_string()))
 }
 
@@ -837,8 +1567,8 @@ fn install_git_action(
     )?;
     let result = (|| -> anyhow::Result<(String, String, String)> {
         let _lock = RepoLock::acquire_foreground("cli install git")?;
-        let skill_dir =
-            cmd::resolve_skill_dir(&temp_dir, parsed.subpath.as_deref(), None).map_err(map_app_err)?;
+        let skill_dir = cmd::resolve_skill_dir(&temp_dir, parsed.subpath.as_deref(), None)
+            .map_err(map_app_err)?;
         let revision = git_fetcher::get_head_revision(&temp_dir)?;
         let install_result = installer::install_from_git_dir(&skill_dir, name)?;
         let metadata = cmd::InstallSourceMetadata {
@@ -872,7 +1602,8 @@ fn install_skillssh_action(
     let proxy_url = store.proxy_url();
     let repo_url = format!("https://github.com/{}.git", source);
     let cancel = Arc::new(AtomicBool::new(false));
-    let temp_dir = git_fetcher::clone_repo_ref(&repo_url, None, Some(&cancel), proxy_url.as_deref())?;
+    let temp_dir =
+        git_fetcher::clone_repo_ref(&repo_url, None, Some(&cancel), proxy_url.as_deref())?;
     let result = (|| -> anyhow::Result<(String, String, String)> {
         let _lock = RepoLock::acquire_foreground("cli install skillssh")?;
         let skill_dir =
@@ -953,13 +1684,18 @@ fn run_update(
     for skill in targets {
         let report = match skill.source_type.as_str() {
             "git" | "skillssh" => {
-                match cmd::update_git_skill_internal(store, &skill.id, proxy_url.as_deref(), None) {
+                match cmd::update_git_skill_internal(store, &skill.id, proxy_url.as_deref(), None, None) {
                     Ok(r) => UpdateReport {
                         skill_id: skill.id.clone(),
                         name: skill.name.clone(),
                         source_type: skill.source_type.clone(),
                         refreshed: r.content_changed,
                         error: None,
+                        held_back_removals: r
+                            .pending_removals
+                            .iter()
+                            .map(|p| format!("{}: {}", p.location, p.path))
+                            .collect(),
                     },
                     Err(e) => UpdateReport {
                         skill_id: skill.id.clone(),
@@ -967,33 +1703,39 @@ fn run_update(
                         source_type: skill.source_type.clone(),
                         refreshed: false,
                         error: Some(e.message.clone()),
+                        held_back_removals: Vec::new(),
                     },
                 }
             }
-            "local" | "import" => {
-                match cmd::reimport_local_skill_internal(store, &skill.id) {
-                    Ok(_) => UpdateReport {
-                        skill_id: skill.id.clone(),
-                        name: skill.name.clone(),
-                        source_type: skill.source_type.clone(),
-                        refreshed: true,
-                        error: None,
-                    },
-                    Err(e) => UpdateReport {
-                        skill_id: skill.id.clone(),
-                        name: skill.name.clone(),
-                        source_type: skill.source_type.clone(),
-                        refreshed: false,
-                        error: Some(e.message.clone()),
-                    },
-                }
-            }
+            "local" | "import" => match cmd::reimport_local_skill_internal(store, &skill.id, None) {
+                Ok(r) => UpdateReport {
+                    skill_id: skill.id.clone(),
+                    name: skill.name.clone(),
+                    source_type: skill.source_type.clone(),
+                    refreshed: r.pending_removals.is_empty(),
+                    error: None,
+                    held_back_removals: r
+                        .pending_removals
+                        .iter()
+                        .map(|p| format!("{}: {}", p.location, p.path))
+                        .collect(),
+                },
+                Err(e) => UpdateReport {
+                    skill_id: skill.id.clone(),
+                    name: skill.name.clone(),
+                    source_type: skill.source_type.clone(),
+                    refreshed: false,
+                    error: Some(e.message.clone()),
+                    held_back_removals: Vec::new(),
+                },
+            },
             other => UpdateReport {
                 skill_id: skill.id.clone(),
                 name: skill.name.clone(),
                 source_type: skill.source_type.clone(),
                 refreshed: false,
                 error: Some(format!("source type '{other}' cannot be refreshed")),
+                held_back_removals: Vec::new(),
             },
         };
         reports.push(report);
@@ -1059,10 +1801,10 @@ fn select_skill_ids(
             bail!("pass either a ref or --all, not both");
         }
         Ok(vec![resolve_skill(store, r)?])
-    } else {
-        // No ref → treat as --all (the flag is just explicit confirmation)
-        let _ = all;
+    } else if all {
         Ok(store.get_all_skills()?)
+    } else {
+        bail!("pass a skill ref or --all")
     }
 }
 
@@ -1094,11 +1836,11 @@ fn run_remove(
             dry_run: true,
         });
     }
+    if !failed.is_empty() {
+        bail!("could not resolve every skill: {}", failed.join("; "));
+    }
     if !yes {
-        bail!(
-            "refusing to delete {} skill(s) without --yes",
-            ids.len()
-        );
+        bail!("refusing to delete {} skill(s) without --yes", ids.len());
     }
 
     let result = cmd::delete_managed_skills_by_ids(store, &ids).map_err(map_app_err)?;
@@ -1135,11 +1877,15 @@ fn run_deprecated_set_enabled(
         } else {
             false
         };
-        let enabled_after = if requested_enabled { true } else { skill.enabled };
-        let message = if requested_enabled {
-            "Deprecated no-op: skills are enabled by adding them to a preset; this command only restores legacy sync inclusion."
+        let enabled_after = if requested_enabled {
+            true
         } else {
-            "Deprecated no-op: skills are disabled by removing them from a preset; this command does not modify the legacy enabled flag."
+            skill.enabled
+        };
+        let message = if requested_enabled {
+            "Deprecated compatibility command: use `skills deploy --agent <key>` to make a skill available to an agent."
+        } else {
+            "Deprecated compatibility command: use `skills undeploy --agent <key>` to remove a skill from an agent."
         };
         reports.push(DeprecatedEnableReport {
             skill_id: skill.id,
@@ -1212,9 +1958,13 @@ fn run_sync(
         let all_targets = scenario_service::collect_scenario_sync_targets(store, &preset.id)
             .map_err(map_app_err)?;
         let desired: Vec<_> = all_targets.into_iter().filter(|tg| tg.tool == t).collect();
-        scenario_service::sync_desired_targets(store, &desired).map_err(map_app_err)?;
+        let refusals =
+            scenario_service::sync_desired_targets(store, &desired).map_err(map_app_err)?;
+        scenario_service::refusals_to_error(refusals).map_err(map_app_err)?;
     } else {
-        scenario_service::apply_scenario_to_default(store, &preset.id).map_err(map_app_err)?;
+        let refusals =
+            scenario_service::apply_scenario_to_default(store, &preset.id).map_err(map_app_err)?;
+        scenario_service::refusals_to_error(refusals).map_err(map_app_err)?;
     }
 
     Ok(SyncReport {
@@ -1299,7 +2049,12 @@ fn run_adopt(
                      https://github.com/owner/repo/tree/branch/path/to/skill"
                 );
             }
-            Some((parsed.clone_url, subpath, parsed.branch, Some(url.to_string())))
+            Some((
+                parsed.clone_url,
+                subpath,
+                parsed.branch,
+                Some(url.to_string()),
+            ))
         } else {
             None
         };
@@ -1494,14 +2249,18 @@ fn run_tag(args: TagArgs, store: &SkillStore, json: bool) -> anyhow::Result<()> 
     match args.command {
         TagCommand::Add { reference, tags } => {
             let skill = resolve_skill(store, &reference)?;
-            let mut current = store.get_tags_map()?.get(&skill.id).cloned().unwrap_or_default();
+            let mut current = store
+                .get_tags_map()?
+                .get(&skill.id)
+                .cloned()
+                .unwrap_or_default();
             for t in tags {
-                if !current.iter().any(|c| c == &t) {
-                    current.push(t);
+                let tag = t.trim();
+                if !tag.is_empty() && !current.iter().any(|c| c == tag) {
+                    current.push(tag.to_string());
                 }
             }
-            store.set_tags_for_skill(&skill.id, &current)?;
-            sync_metadata::ensure_skill_metadata(store, &skill.id)?;
+            cmd::set_skill_tags_internal(store, &skill.id, &current).map_err(map_app_err)?;
             print_json(
                 &TagReport {
                     skill_id: skill.id,
@@ -1513,10 +2272,13 @@ fn run_tag(args: TagArgs, store: &SkillStore, json: bool) -> anyhow::Result<()> 
         }
         TagCommand::Remove { reference, tags } => {
             let skill = resolve_skill(store, &reference)?;
-            let mut current = store.get_tags_map()?.get(&skill.id).cloned().unwrap_or_default();
-            current.retain(|c| !tags.iter().any(|t| t == c));
-            store.set_tags_for_skill(&skill.id, &current)?;
-            sync_metadata::ensure_skill_metadata(store, &skill.id)?;
+            let mut current = store
+                .get_tags_map()?
+                .get(&skill.id)
+                .cloned()
+                .unwrap_or_default();
+            current.retain(|c| !tags.iter().any(|t| t.trim() == c));
+            cmd::set_skill_tags_internal(store, &skill.id, &current).map_err(map_app_err)?;
             print_json(
                 &TagReport {
                     skill_id: skill.id,
@@ -1526,10 +2288,73 @@ fn run_tag(args: TagArgs, store: &SkillStore, json: bool) -> anyhow::Result<()> 
                 json,
             );
         }
+        TagCommand::Set { reference, tags } => {
+            let skill = resolve_skill(store, &reference)?;
+            cmd::set_skill_tags_internal(store, &skill.id, &tags).map_err(map_app_err)?;
+            let current = store
+                .get_tags_map()?
+                .get(&skill.id)
+                .cloned()
+                .unwrap_or_default();
+            print_json(
+                &TagReport {
+                    skill_id: skill.id,
+                    name: skill.name,
+                    tags: current,
+                },
+                json,
+            );
+        }
+        TagCommand::Rename { old_name, new_name } => {
+            let old_name = old_name.trim().to_string();
+            let new_name = new_name.trim().to_string();
+            let affected =
+                cmd::rename_tag_internal(store, &old_name, &new_name).map_err(map_app_err)?;
+            print_json(
+                &GlobalTagReport {
+                    ok: true,
+                    tag: old_name,
+                    renamed_to: Some(new_name),
+                    affected_skills: affected.len(),
+                    dry_run: false,
+                    deleted: false,
+                },
+                json,
+            );
+        }
+        TagCommand::Delete { name, yes, dry_run } => {
+            let name = name.trim().to_string();
+            let affected_skills = store
+                .get_tags_map()?
+                .values()
+                .filter(|tags| tags.iter().any(|tag| tag == &name))
+                .count();
+            if !dry_run && !yes {
+                bail!("refusing to delete tag without --yes");
+            }
+            if !dry_run {
+                cmd::delete_tag_internal(store, &name).map_err(map_app_err)?;
+            }
+            print_json(
+                &GlobalTagReport {
+                    ok: true,
+                    tag: name,
+                    renamed_to: None,
+                    affected_skills,
+                    dry_run,
+                    deleted: !dry_run,
+                },
+                json,
+            );
+        }
         TagCommand::List { reference } => {
             if let Some(r) = reference {
                 let skill = resolve_skill(store, &r)?;
-                let tags = store.get_tags_map()?.get(&skill.id).cloned().unwrap_or_default();
+                let tags = store
+                    .get_tags_map()?
+                    .get(&skill.id)
+                    .cloned()
+                    .unwrap_or_default();
                 print_json(
                     &TagReport {
                         skill_id: skill.id,
@@ -1552,16 +2377,90 @@ fn run_presets(args: PresetArgs, store: &SkillStore, json: bool) -> anyhow::Resu
     match args.command {
         PresetCommand::List => print_json(&list_presets(store)?, json),
         PresetCommand::Current => print_json(&current_preset(store)?, json),
+        PresetCommand::Show { reference } => {
+            let preset = resolve_scenario(store, &reference)?;
+            print_json(&preset_info_for(store, preset)?, json);
+        }
+        PresetCommand::Create {
+            name,
+            description,
+            icon,
+        } => {
+            let preset = preset_cmd::create_preset_internal(
+                store,
+                &name,
+                description.as_deref(),
+                icon.as_deref(),
+            )
+            .map_err(map_app_err)?;
+            print_json(&preset_info_for(store, preset)?, json);
+        }
+        PresetCommand::Update {
+            reference,
+            name,
+            description,
+            icon,
+        } => {
+            if name.is_none() && description.is_none() && icon.is_none() {
+                bail!("pass at least one of --name, --description, or --icon");
+            }
+            let preset = resolve_scenario(store, &reference)?;
+            let next_name = name.unwrap_or_else(|| preset.name.clone());
+            let next_description = match description {
+                Some(value) if value.trim().is_empty() => None,
+                Some(value) => Some(value),
+                None => preset.description.clone(),
+            };
+            let next_icon = match icon {
+                Some(value) if value.trim().is_empty() => None,
+                Some(value) => Some(value),
+                None => preset.icon.clone(),
+            };
+            preset_cmd::update_preset_internal(
+                store,
+                &preset.id,
+                &next_name,
+                next_description.as_deref(),
+                next_icon.as_deref(),
+            )
+            .map_err(map_app_err)?;
+            let updated = resolve_scenario(store, &preset.id)?;
+            print_json(&preset_info_for(store, updated)?, json);
+        }
+        PresetCommand::Delete {
+            reference,
+            yes,
+            dry_run,
+        } => {
+            let preset = resolve_scenario(store, &reference)?;
+            if !dry_run && !yes {
+                bail!("refusing to delete preset without --yes");
+            }
+            if !dry_run {
+                preset_cmd::delete_preset_internal(store, &preset.id).map_err(map_app_err)?;
+            }
+            print_json(
+                &PresetDeleteReport {
+                    ok: true,
+                    preset_id: preset.id,
+                    preset_name: preset.name,
+                    dry_run,
+                    deleted: !dry_run,
+                },
+                json,
+            );
+        }
         PresetCommand::Preview { reference } => {
             let preset = resolve_scenario(store, &reference)?;
-            let preview = scenario_service::preview_scenario_sync(store, &preset.id)
-                .map_err(map_app_err)?;
+            let preview =
+                scenario_service::preview_scenario_sync(store, &preset.id).map_err(map_app_err)?;
             print_json(&preview, json);
         }
         PresetCommand::Apply { reference } => {
             let preset = resolve_scenario(store, &reference)?;
-            scenario_service::apply_scenario_to_default(store, &preset.id)
+            let refusals = scenario_service::apply_scenario_to_default(store, &preset.id)
                 .map_err(map_app_err)?;
+            scenario_service::refusals_to_error(refusals).map_err(map_app_err)?;
             print_json(&current_preset(store)?, json);
         }
         PresetCommand::Deactivate { reference } => {
@@ -1573,8 +2472,11 @@ fn run_presets(args: PresetArgs, store: &SkillStore, json: bool) -> anyhow::Resu
             if is_active {
                 let next_active = replacement_preset_after_deactivate(store, &preset.id)?;
                 if let Some(next) = next_active.as_ref() {
-                    scenario_service::apply_scenario_to_default(store, &next.id)
-                        .map_err(map_app_err)?;
+                    for refusal in scenario_service::apply_scenario_to_default(store, &next.id)
+                        .map_err(map_app_err)?
+                    {
+                        eprintln!("warning: {refusal}");
+                    }
                 } else {
                     scenario_service::unsync_scenario_skills(store, &preset.id)
                         .map_err(map_app_err)?;
@@ -1585,11 +2487,15 @@ fn run_presets(args: PresetArgs, store: &SkillStore, json: bool) -> anyhow::Resu
                 // any skills it shares with the active preset. Unsync this
                 // preset first, then re-sync the active preset so the shared
                 // targets are restored.
-                scenario_service::unsync_scenario_skills(store, &preset.id)
-                    .map_err(map_app_err)?;
+                scenario_service::unsync_scenario_skills(store, &preset.id).map_err(map_app_err)?;
                 if let Some(active_id) = active.as_deref() {
-                    scenario_service::sync_scenario_skills(store, active_id)
-                        .map_err(map_app_err)?;
+                    // The delete already happened; a refusal here must not fail
+                    // the command, only be reported.
+                    for refusal in scenario_service::sync_scenario_skills(store, active_id)
+                        .map_err(map_app_err)?
+                    {
+                        eprintln!("warning: {refusal}");
+                    }
                 }
             }
 
@@ -1609,58 +2515,332 @@ fn run_presets(args: PresetArgs, store: &SkillStore, json: bool) -> anyhow::Resu
                 json,
             );
         }
+        PresetCommand::Deploy {
+            reference,
+            agents,
+            dry_run,
+        } => {
+            let report = run_preset_deployment(store, &reference, &agents, true, dry_run)?;
+            print_json(&report, json);
+        }
+        PresetCommand::Undeploy {
+            reference,
+            agents,
+            dry_run,
+        } => {
+            let report = run_preset_deployment(store, &reference, &agents, false, dry_run)?;
+            print_json(&report, json);
+        }
+        PresetCommand::Status { reference, agents } => {
+            print_json(&preset_status(store, &reference, &agents)?, json);
+        }
         PresetCommand::AddSkill { preset, skills } => {
             let s = resolve_scenario(store, &preset)?;
-            let mut added = Vec::new();
-            let mut missing = Vec::new();
-            for r in skills {
-                match resolve_skill(store, &r) {
-                    Ok(skill) => {
-                        store.add_skill_to_scenario(&s.id, &skill.id)?;
-                        added.push(skill.name);
-                    }
-                    Err(_) => missing.push(r),
-                }
-            }
-            sync_metadata::write_all_from_db(store)?;
+            let resolved = resolve_skill_references(store, &skills)?;
+            let ids: Vec<String> = resolved.iter().map(|skill| skill.id.clone()).collect();
+            preset_cmd::set_preset_skills_internal(store, &s.id, &ids, true)
+                .map_err(map_app_err)?;
             print_json(
                 &PresetMembershipReport {
                     preset_id: s.id,
                     preset_name: s.name,
-                    added,
+                    added: resolved.into_iter().map(|skill| skill.name).collect(),
                     removed: Vec::new(),
-                    missing,
+                    missing: Vec::new(),
                 },
                 json,
             );
         }
         PresetCommand::RemoveSkill { preset, skills } => {
             let s = resolve_scenario(store, &preset)?;
-            let mut removed = Vec::new();
-            let mut missing = Vec::new();
-            for r in skills {
-                match resolve_skill(store, &r) {
-                    Ok(skill) => {
-                        store.remove_skill_from_scenario(&s.id, &skill.id)?;
-                        removed.push(skill.name);
-                    }
-                    Err(_) => missing.push(r),
-                }
-            }
-            sync_metadata::write_all_from_db(store)?;
+            let resolved = resolve_skill_references(store, &skills)?;
+            let ids: Vec<String> = resolved.iter().map(|skill| skill.id.clone()).collect();
+            preset_cmd::set_preset_skills_internal(store, &s.id, &ids, false)
+                .map_err(map_app_err)?;
             print_json(
                 &PresetMembershipReport {
                     preset_id: s.id,
                     preset_name: s.name,
                     added: Vec::new(),
-                    removed,
-                    missing,
+                    removed: resolved.into_iter().map(|skill| skill.name).collect(),
+                    missing: Vec::new(),
                 },
                 json,
             );
         }
     }
     Ok(())
+}
+
+fn preset_info_for(
+    store: &SkillStore,
+    preset: app_lib::core::skill_store::ScenarioRecord,
+) -> anyhow::Result<PresetInfo> {
+    let active = store.get_active_scenario_id()?;
+    Ok(PresetInfo {
+        skill_count: store.get_skill_ids_for_scenario(&preset.id)?.len(),
+        active: active.as_deref() == Some(preset.id.as_str()),
+        id: preset.id,
+        name: preset.name,
+        description: preset.description,
+        icon: preset.icon,
+        sort_order: preset.sort_order,
+    })
+}
+
+fn select_preset_agents(
+    store: &SkillStore,
+    requested: &[String],
+    require_available: bool,
+) -> anyhow::Result<Vec<tool_service::ToolInfo>> {
+    let infos = tool_service::list_tool_info(store);
+    if requested.is_empty() {
+        return Ok(infos
+            .into_iter()
+            .filter(|agent| {
+                agent.installed
+                    && agent.enabled
+                    && matches!(agent.category, tool_adapters::ToolCategory::Coding)
+            })
+            .collect());
+    }
+
+    let mut selected = Vec::new();
+    for key in requested {
+        let agent = infos
+            .iter()
+            .find(|agent| agent.key == *key)
+            .ok_or_else(|| anyhow!("unknown agent: {key}"))?;
+        if require_available && !agent.installed {
+            bail!("agent is not installed: {}", agent.display_name);
+        }
+        if require_available && !agent.enabled {
+            bail!("agent is disabled: {}", agent.display_name);
+        }
+        if !selected
+            .iter()
+            .any(|existing: &tool_service::ToolInfo| existing.key == agent.key)
+        {
+            selected.push(agent.clone());
+        }
+    }
+    Ok(selected)
+}
+
+fn select_agent_keys_for_removal(
+    store: &SkillStore,
+    requested: &[String],
+    skill_ids: &[String],
+    existing_targets: &[app_lib::core::skill_store::SkillTargetRecord],
+) -> anyhow::Result<Vec<String>> {
+    let deployed_keys: std::collections::HashSet<String> = existing_targets
+        .iter()
+        .filter(|target| skill_ids.contains(&target.skill_id))
+        .map(|target| target.tool.clone())
+        .collect();
+    if requested.is_empty() {
+        let mut keys: Vec<String> = deployed_keys.into_iter().collect();
+        keys.sort();
+        return Ok(keys);
+    }
+
+    let known_keys: std::collections::HashSet<String> = tool_service::list_tool_info(store)
+        .into_iter()
+        .map(|agent| agent.key)
+        .collect();
+    let mut selected = Vec::new();
+    for key in requested {
+        if !known_keys.contains(key) && !deployed_keys.contains(key) {
+            bail!("unknown agent: {key}");
+        }
+        if !selected.contains(key) {
+            selected.push(key.clone());
+        }
+    }
+    Ok(selected)
+}
+
+fn preset_status(
+    store: &SkillStore,
+    reference: &str,
+    requested_agents: &[String],
+) -> anyhow::Result<PresetStatusReport> {
+    let preset = resolve_scenario(store, reference)?;
+    let preset_info = preset_info_for(store, preset.clone())?;
+    let skill_ids = store.get_skill_ids_for_scenario(&preset.id)?;
+    let all_targets = store.get_all_targets()?;
+    let targets: std::collections::HashSet<(String, String)> = all_targets
+        .iter()
+        .filter(|target| target.status == "ok")
+        .map(|target| (target.skill_id.clone(), target.tool.clone()))
+        .collect();
+    let infos = tool_service::list_tool_info(store);
+    let agent_keys = if requested_agents.is_empty() {
+        let mut keys: Vec<String> = infos
+            .iter()
+            .filter(|agent| {
+                agent.installed
+                    && agent.enabled
+                    && matches!(agent.category, tool_adapters::ToolCategory::Coding)
+            })
+            .map(|agent| agent.key.clone())
+            .collect();
+        for target in all_targets
+            .iter()
+            .filter(|target| target.status == "ok" && skill_ids.contains(&target.skill_id))
+        {
+            if !keys.contains(&target.tool) {
+                keys.push(target.tool.clone());
+            }
+        }
+        keys
+    } else {
+        select_agent_keys_for_removal(store, requested_agents, &skill_ids, &all_targets)?
+    };
+    let agents = agent_keys
+        .into_iter()
+        .map(|agent_key| {
+            let deployed = skill_ids
+                .iter()
+                .filter(|skill_id| targets.contains(&((*skill_id).clone(), agent_key.clone())))
+                .count();
+            let total = skill_ids.len();
+            let status = if total == 0 {
+                "empty"
+            } else if deployed == 0 {
+                "inactive"
+            } else if deployed == total {
+                "active"
+            } else {
+                "partial"
+            };
+            let display_name = infos
+                .iter()
+                .find(|agent| agent.key == agent_key)
+                .map(|agent| agent.display_name.clone())
+                .unwrap_or_else(|| agent_key.clone());
+            PresetAgentStatus {
+                key: agent_key,
+                display_name,
+                deployed,
+                total,
+                status: status.to_string(),
+            }
+        })
+        .collect();
+    Ok(PresetStatusReport {
+        preset: preset_info,
+        agents,
+    })
+}
+
+fn run_preset_deployment(
+    store: &SkillStore,
+    reference: &str,
+    requested_agents: &[String],
+    deploy: bool,
+    dry_run: bool,
+) -> anyhow::Result<PresetDeploymentReport> {
+    let preset = resolve_scenario(store, reference)?;
+    let skill_ids = store.get_skill_ids_for_scenario(&preset.id)?;
+    let existing_targets = store.get_all_targets()?;
+    let agent_keys = if deploy {
+        select_preset_agents(store, requested_agents, true)?
+            .into_iter()
+            .map(|agent| agent.key)
+            .collect()
+    } else {
+        select_agent_keys_for_removal(store, requested_agents, &skill_ids, &existing_targets)?
+    };
+    if deploy && agent_keys.is_empty() {
+        bail!("no enabled, installed coding agents found");
+    }
+    let pair_count = skill_ids.len() * agent_keys.len();
+    let existing: std::collections::HashSet<(String, String)> = existing_targets
+        .iter()
+        .filter(|target| !deploy || target.status == "ok")
+        .map(|target| (target.skill_id.clone(), target.tool.clone()))
+        .collect();
+    let changed: std::collections::HashSet<(String, String)> = skill_ids
+        .iter()
+        .flat_map(|skill_id| {
+            agent_keys
+                .iter()
+                .map(move |agent| (skill_id.clone(), agent.clone()))
+        })
+        .filter(|pair| {
+            let present = existing.contains(pair);
+            if deploy {
+                !present
+            } else {
+                present
+            }
+        })
+        .collect();
+    let changed_pairs = changed.len();
+
+    let mut preserved: Vec<String> = Vec::new();
+    if !dry_run {
+        scenario_service::apply_skills_to_tools(
+            store,
+            &skill_ids,
+            &agent_keys,
+            if deploy {
+                scenario_service::BatchApplyMode::Add
+            } else {
+                scenario_service::BatchApplyMode::Remove
+            },
+        )
+        .map_err(map_app_err)?;
+        let verification =
+            verify_deployment_state(store, &skill_ids, &agent_keys, deploy, &existing_targets)?;
+        for skill_id in &skill_ids {
+            let skill = store
+                .get_skill_by_id(skill_id)?
+                .ok_or_else(|| anyhow!("skill missing"))?;
+            for agent in &agent_keys {
+                if verification
+                    .succeeded
+                    .contains(&(skill.id.clone(), agent.clone()))
+                    && changed.contains(&(skill.id.clone(), agent.clone()))
+                {
+                    store.log_audit(
+                        AuditDraft::new(if deploy {
+                            "deploy_preset"
+                        } else {
+                            "undeploy_preset"
+                        })
+                        .skill(skill.id.clone(), skill.name.clone())
+                        .tool(agent.clone())
+                        .detail(format!("preset={} ({})", preset.name, preset.id))
+                        .ok(),
+                    );
+                }
+            }
+        }
+        preserved = verification.preserved.clone();
+        if !verification.failures.is_empty() {
+            bail!(
+                "deployment incomplete: {} pair(s) verified, {} verification issue(s): {}",
+                verification.succeeded.len(),
+                verification.failures.len(),
+                verification.failures.join("; ")
+            );
+        }
+    }
+
+    Ok(PresetDeploymentReport {
+        ok: true,
+        action: if deploy { "deploy" } else { "undeploy" }.to_string(),
+        preset_id: preset.id,
+        preset_name: preset.name,
+        agents: agent_keys,
+        dry_run,
+        skill_count: skill_ids.len(),
+        pair_count,
+        changed_pairs,
+        preserved,
+    })
 }
 
 fn list_presets(store: &SkillStore) -> anyhow::Result<Vec<PresetInfo>> {
@@ -1734,7 +2914,12 @@ fn resolve_scenario(
 
 // ── git ───────────────────────────────────────────────────────────────────
 
-fn run_git(args: GitArgs, store: &SkillStore, has_skills_root: bool, json: bool) -> anyhow::Result<()> {
+fn run_git(
+    args: GitArgs,
+    store: &SkillStore,
+    has_skills_root: bool,
+    json: bool,
+) -> anyhow::Result<()> {
     match args.command {
         GitCommand::Status => {
             print_json(&git_backup::get_status(&central_repo::skills_dir())?, json)
@@ -1743,7 +2928,10 @@ fn run_git(args: GitArgs, store: &SkillStore, has_skills_root: bool, json: bool)
             // No settings store on this path; the hostname default matches
             // what the GUI derives, and the GUI reconciles the repo identity
             // on its next backup anyway.
-            git_backup::init_repo(&central_repo::skills_dir(), &git_backup::default_device_name())?;
+            git_backup::init_repo(
+                &central_repo::skills_dir(),
+                &git_backup::default_device_name(),
+            )?;
             print_json(&git_backup::get_status(&central_repo::skills_dir())?, json);
         }
         GitCommand::Clone { url } => {
@@ -1807,8 +2995,44 @@ fn run_git(args: GitArgs, store: &SkillStore, has_skills_root: bool, json: bool)
 
 // ── helpers ───────────────────────────────────────────────────────────────
 
+/// Keep the `AppError` itself in the chain rather than only its sentence:
+/// `main` downcasts it to emit a machine-readable JSON envelope for the kinds
+/// that carry details (a deployment refusal names the paths in the way).
+/// The `--json` failure envelope.
+///
+/// Most failures are one sentence and `COMMAND_FAILED`. A few carry specifics
+/// the caller has to act on rather than repeat — a deployment refusal names
+/// the paths in the way — and those pass their structure straight through, so
+/// an agent can say which directory is blocking and offer the way out (#363).
+fn error_envelope(err: &anyhow::Error) -> serde_json::Value {
+    let message = format!("{err:#}");
+    match err.downcast_ref::<AppError>() {
+        Some(app_err) if app_err.details.is_some() => {
+            let mut value = serde_json::to_value(app_err).unwrap();
+            let object = value.as_object_mut().unwrap();
+            object.insert("ok".into(), serde_json::Value::Bool(false));
+            // Derive the code from the kind that is already on the wire, so a
+            // future detail-carrying kind cannot ship a contradicting code.
+            let code = object
+                .get("kind")
+                .and_then(|kind| kind.as_str())
+                .unwrap_or("command_failed")
+                .to_ascii_uppercase();
+            object.insert("code".into(), serde_json::Value::String(code));
+            object.insert("error".into(), serde_json::Value::String(message));
+            value
+        }
+        _ => serde_json::json!({
+            "ok": false,
+            "code": "COMMAND_FAILED",
+            "message": message.clone(),
+            "error": message,
+        }),
+    }
+}
+
 fn map_app_err(e: AppError) -> anyhow::Error {
-    anyhow!(e.message)
+    anyhow::Error::new(e)
 }
 
 fn print_json<T: Serialize>(value: &T, json: bool) {
@@ -1818,4 +3042,340 @@ fn print_json<T: Serialize>(value: &T, json: bool) {
         serde_json::to_string_pretty(value).unwrap()
     };
     println!("{rendered}");
+}
+
+#[cfg(test)]
+mod tests {
+    /// An agent has to name the directory that is in the way and say the
+    /// contents survived. Flattening the refusal into one sentence is what
+    /// made that impossible, so the paths must reach the envelope as data.
+    #[test]
+    fn a_deployment_refusal_keeps_its_paths_in_the_json_envelope() {
+        let err = map_app_err(AppError::target_conflict(
+            "Refusing to deploy: 1 of 2 target(s) …",
+            vec![app_lib::core::error::TargetConflictDetail {
+                path: "/home/me/.claude/skills/db".to_string(),
+                reason: "is not a managed deployment".to_string(),
+            }],
+        ));
+
+        let envelope = error_envelope(&err);
+        assert_eq!(envelope["ok"], false);
+        assert_eq!(envelope["code"], "TARGET_CONFLICT");
+        assert_eq!(envelope["kind"], "target_conflict");
+        assert_eq!(
+            envelope["details"]["conflicts"][0]["path"],
+            "/home/me/.claude/skills/db"
+        );
+    }
+
+    /// Everything else keeps the shape callers already parse.
+    #[test]
+    fn an_ordinary_failure_keeps_the_command_failed_envelope() {
+        let envelope = error_envelope(&anyhow!("no agent key provided"));
+        assert_eq!(envelope["code"], "COMMAND_FAILED");
+        assert_eq!(envelope["message"], "no agent key provided");
+        assert!(envelope.get("details").is_none());
+    }
+
+    use super::*;
+    use app_lib::core::skill_store::{ScenarioRecord, SkillRecord};
+    use app_lib::core::tool_adapters::{CustomToolDef, ToolCategory};
+    use std::fs;
+    use tempfile::tempdir;
+
+    #[test]
+    fn parses_agent_friendly_commands_and_aliases() {
+        let cli = Cli::try_parse_from([
+            "skills-manager-cli",
+            "--json",
+            "skills",
+            "deploy",
+            "browser",
+            "--to",
+            "codex",
+            "--agent",
+            "claude_code",
+            "--dry-run",
+        ])
+        .unwrap();
+        assert!(cli.json);
+        assert!(matches!(
+            cli.command,
+            Commands::Skills(SkillsArgs {
+                command: SkillsCommand::Deploy {
+                    agents,
+                    dry_run: true,
+                    ..
+                }
+            }) if agents == vec!["codex", "claude_code"]
+        ));
+
+        let cli = Cli::try_parse_from([
+            "skills-manager-cli",
+            "skills",
+            "list",
+            "--query",
+            "react",
+            "--tag",
+            "frontend",
+            "--preset",
+            "Web Dev",
+            "--deployed-to",
+            "claude_code",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Commands::Skills(SkillsArgs {
+                command: SkillsCommand::List {
+                    query: Some(query),
+                    tags,
+                    preset: Some(preset),
+                    deployed_to: Some(agent),
+                    ..
+                }
+            }) if query == "react"
+                && tags == vec!["frontend"]
+                && preset == "Web Dev"
+                && agent == "claude_code"
+        ));
+
+        let cli = Cli::try_parse_from([
+            "skills-manager-cli",
+            "agents",
+            "enable",
+            "codex",
+            "claude_code",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Commands::Tools(ToolsArgs {
+                command: ToolsCommand::Enable { agents }
+            }) if agents == vec!["codex", "claude_code"]
+        ));
+
+        let cli = Cli::try_parse_from([
+            "skills-manager-cli",
+            "presets",
+            "open",
+            "Web Dev",
+            "--agent",
+            "codex",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Commands::Presets(PresetArgs {
+                command: PresetCommand::Deploy {
+                    reference,
+                    agents,
+                    ..
+                }
+            }) if reference == "Web Dev" && agents == vec!["codex"]
+        ));
+    }
+
+    #[test]
+    fn skill_and_preset_deployment_round_trip() {
+        let tmp = tempdir().unwrap();
+        let store = SkillStore::new(&tmp.path().join("skills.db")).unwrap();
+        let source = tmp.path().join("central/demo");
+        let target_root = tmp.path().join("agent-skills");
+        fs::create_dir_all(&source).unwrap();
+        fs::create_dir_all(&target_root).unwrap();
+        fs::write(
+            source.join("SKILL.md"),
+            "---\nname: demo\ndescription: test skill\n---\n",
+        )
+        .unwrap();
+        fs::write(source.join("payload.txt"), "managed").unwrap();
+
+        let test_agent = CustomToolDef {
+            key: "test_agent".to_string(),
+            display_name: "Test Agent".to_string(),
+            skills_dir: target_root.to_string_lossy().to_string(),
+            project_relative_skills_dir: None,
+            category: ToolCategory::Coding,
+        };
+        tool_service::set_custom_tools(&store, &[test_agent.clone()]).unwrap();
+        store.set_setting("sync_mode", "copy").unwrap();
+        store
+            .insert_skill(&SkillRecord {
+                id: "skill-demo".to_string(),
+                name: "demo".to_string(),
+                description: Some("test skill".to_string()),
+                source_type: "local".to_string(),
+                source_ref: Some(source.to_string_lossy().to_string()),
+                source_ref_resolved: None,
+                source_subpath: None,
+                source_branch: None,
+                source_revision: None,
+                remote_revision: None,
+                central_path: source.to_string_lossy().to_string(),
+                content_hash: None,
+                enabled: true,
+                created_at: 1,
+                updated_at: 1,
+                status: "ok".to_string(),
+                update_status: "local_only".to_string(),
+                last_checked_at: None,
+                last_check_error: None,
+            })
+            .unwrap();
+
+        let dry_run = run_skill_deployment(
+            &store,
+            &["demo".to_string()],
+            &["test_agent".to_string()],
+            true,
+            true,
+        )
+        .unwrap();
+        assert_eq!(dry_run.changed_pairs, 1);
+        assert!(!target_root.join("demo").exists());
+        assert!(store.get_all_targets().unwrap().is_empty());
+
+        let deployed = run_skill_deployment(
+            &store,
+            &["demo".to_string()],
+            &["test_agent".to_string()],
+            true,
+            false,
+        )
+        .unwrap();
+        assert_eq!(deployed.changed_pairs, 1);
+        assert_eq!(
+            fs::read_to_string(target_root.join("demo/payload.txt")).unwrap(),
+            "managed"
+        );
+        let status = skill_status(&store, "demo").unwrap();
+        assert!(status
+            .agents
+            .iter()
+            .any(|agent| agent.key == "test_agent" && agent.deployed));
+
+        let dry_remove = run_skill_deployment(
+            &store,
+            &["demo".to_string()],
+            &["test_agent".to_string()],
+            false,
+            true,
+        )
+        .unwrap();
+        assert_eq!(dry_remove.changed_pairs, 1);
+        assert!(target_root.join("demo").exists());
+
+        run_skill_deployment(
+            &store,
+            &["demo".to_string()],
+            &["test_agent".to_string()],
+            false,
+            false,
+        )
+        .unwrap();
+        assert!(!target_root.join("demo").exists());
+        assert!(store.get_all_targets().unwrap().is_empty());
+        let audit_count = store.list_audit(None).unwrap().len();
+        let noop_remove = run_skill_deployment(
+            &store,
+            &["demo".to_string()],
+            &["test_agent".to_string()],
+            false,
+            false,
+        )
+        .unwrap();
+        assert_eq!(noop_remove.changed_pairs, 0);
+        assert_eq!(store.list_audit(None).unwrap().len(), audit_count);
+
+        store
+            .insert_scenario(&ScenarioRecord {
+                id: "preset-web".to_string(),
+                name: "Web Dev".to_string(),
+                description: None,
+                icon: None,
+                sort_order: 0,
+                created_at: 1,
+                updated_at: 1,
+            })
+            .unwrap();
+        store
+            .add_skill_to_scenario("preset-web", "skill-demo")
+            .unwrap();
+
+        let deployed =
+            run_preset_deployment(&store, "Web Dev", &["test_agent".to_string()], true, false)
+                .unwrap();
+        assert_eq!(deployed.changed_pairs, 1);
+        let status = preset_status(&store, "Web Dev", &["test_agent".to_string()]).unwrap();
+        assert_eq!(status.agents[0].status, "active");
+
+        store
+            .set_setting(
+                "disabled_tools",
+                &serde_json::to_string(&vec!["test_agent"]).unwrap(),
+            )
+            .unwrap();
+        let status = preset_status(&store, "Web Dev", &[]).unwrap();
+        assert!(status
+            .agents
+            .iter()
+            .any(|agent| agent.key == "test_agent" && agent.status == "active"));
+
+        tool_service::set_custom_tools(&store, &[]).unwrap();
+        let status = skill_status(&store, "demo").unwrap();
+        assert!(status
+            .agents
+            .iter()
+            .any(|agent| { agent.key == "test_agent" && agent.deployed && !agent.installed }));
+
+        run_preset_deployment(&store, "Web Dev", &[], false, false).unwrap();
+        tool_service::set_custom_tools(&store, &[test_agent]).unwrap();
+        let status = preset_status(&store, "Web Dev", &["test_agent".to_string()]).unwrap();
+        assert_eq!(status.agents[0].status, "inactive");
+        assert!(!target_root.join("demo").exists());
+
+        store.set_setting("disabled_tools", "[]").unwrap();
+        let missing_source = tmp.path().join("central/broken");
+        store
+            .insert_skill(&SkillRecord {
+                id: "skill-broken".to_string(),
+                name: "broken".to_string(),
+                description: Some("missing source".to_string()),
+                source_type: "local".to_string(),
+                source_ref: Some(missing_source.to_string_lossy().to_string()),
+                source_ref_resolved: None,
+                source_subpath: None,
+                source_branch: None,
+                source_revision: None,
+                remote_revision: None,
+                central_path: missing_source.to_string_lossy().to_string(),
+                content_hash: None,
+                enabled: true,
+                created_at: 1,
+                updated_at: 1,
+                status: "ok".to_string(),
+                update_status: "local_only".to_string(),
+                last_checked_at: None,
+                last_check_error: None,
+            })
+            .unwrap();
+        let audit_count = store.list_audit(None).unwrap().len();
+        let error = run_skill_deployment(
+            &store,
+            &["demo".to_string(), "broken".to_string()],
+            &["test_agent".to_string()],
+            true,
+            false,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("deployment incomplete"));
+        assert!(target_root.join("demo").exists());
+        assert!(!target_root.join("broken").exists());
+        let audit = store.list_audit(None).unwrap();
+        assert_eq!(audit.len(), audit_count + 1);
+        assert_eq!(audit[0].action, "deploy");
+        assert_eq!(audit[0].skill_id.as_deref(), Some("skill-demo"));
+    }
 }

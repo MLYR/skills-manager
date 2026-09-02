@@ -8,8 +8,9 @@ use crate::core::{
     error::AppError,
     scenario_service::{self, BatchApplyMode},
     skill_store::{ScenarioRecord, SkillStore},
-    sync_metadata, tool_adapters,
+    sync_metadata,
     timing::should_log_first_or_slow,
+    tool_adapters,
 };
 
 fn refresh_tray_menu_best_effort(app: &tauri::AppHandle) {
@@ -42,10 +43,22 @@ pub struct PresetDto {
 
 static GET_PRESETS_FIRST_CALL: AtomicBool = AtomicBool::new(true);
 
+fn preset_dto(store: &SkillStore, scenario: ScenarioRecord) -> PresetDto {
+    let skill_count = store.count_skills_for_scenario(&scenario.id).unwrap_or(0);
+    PresetDto {
+        id: scenario.id,
+        name: scenario.name,
+        description: scenario.description,
+        icon: scenario.icon,
+        sort_order: scenario.sort_order,
+        skill_count,
+        created_at: scenario.created_at,
+        updated_at: scenario.updated_at,
+    }
+}
+
 #[tauri::command]
-pub async fn get_presets(
-    store: State<'_, Arc<SkillStore>>,
-) -> Result<Vec<PresetDto>, AppError> {
+pub async fn get_presets(store: State<'_, Arc<SkillStore>>) -> Result<Vec<PresetDto>, AppError> {
     let store = store.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         let start = Instant::now();
@@ -53,17 +66,7 @@ pub async fn get_presets(
         let count = scenarios.len();
         let mut result = Vec::new();
         for s in scenarios {
-            let skill_count = store.count_skills_for_scenario(&s.id).unwrap_or(0);
-            result.push(PresetDto {
-                id: s.id,
-                name: s.name,
-                description: s.description,
-                icon: s.icon,
-                sort_order: s.sort_order,
-                skill_count,
-                created_at: s.created_at,
-                updated_at: s.updated_at,
-            });
+            result.push(preset_dto(&store, s));
         }
         let elapsed_ms = start.elapsed().as_millis();
         if should_log_first_or_slow(&GET_PRESETS_FIRST_CALL, elapsed_ms, 100) {
@@ -85,17 +88,7 @@ pub async fn get_active_preset(
         if let Some(id) = active_id {
             let scenarios = store.get_all_scenarios().map_err(AppError::db)?;
             if let Some(s) = scenarios.into_iter().find(|s| s.id == id) {
-                let count = store.count_skills_for_scenario(&s.id).unwrap_or(0);
-                return Ok(Some(PresetDto {
-                    id: s.id,
-                    name: s.name,
-                    description: s.description,
-                    icon: s.icon,
-                    sort_order: s.sort_order,
-                    skill_count: count,
-                    created_at: s.created_at,
-                    updated_at: s.updated_at,
-                }));
+                return Ok(Some(preset_dto(&store, s)));
             }
         }
         Ok(None)
@@ -113,47 +106,70 @@ pub async fn create_preset(
 ) -> Result<PresetDto, AppError> {
     let store = store.inner().clone();
     let result = tauri::async_runtime::spawn_blocking(move || {
-        let now = chrono::Utc::now().timestamp_millis();
-        let id = uuid::Uuid::new_v4().to_string();
-        let previous_active_id = store.get_active_scenario_id().map_err(AppError::db)?;
-
-        let record = ScenarioRecord {
-            id: id.clone(),
-            name: name.clone(),
-            description: description.clone(),
-            icon: icon.clone(),
-            sort_order: 999,
-            created_at: now,
-            updated_at: now,
-        };
-
-        sync_metadata::with_repo_lock("create scenario", || {
-            store.insert_scenario(&record)?;
-            sync_metadata::write_all_from_db_unlocked(&store)
-        })
-        .map_err(AppError::db)?;
-
-        if let Some(previous_id) = previous_active_id.as_deref() {
-            unsync_scenario_skills(&store, previous_id)?;
-        }
-        store.set_active_scenario(&id).map_err(AppError::db)?;
-
-        Ok(PresetDto {
-            id,
-            name,
-            description,
-            icon,
-            sort_order: 999,
-            skill_count: 0,
-            created_at: now,
-            updated_at: now,
-        })
+        create_and_activate_preset_internal(&store, &name, description.as_deref(), icon.as_deref())
+            .map(|scenario| preset_dto(&store, scenario))
     })
     .await?;
     if result.is_ok() {
         refresh_tray_menu_best_effort(&app);
     }
     result
+}
+
+pub fn create_preset_internal(
+    store: &SkillStore,
+    name: &str,
+    description: Option<&str>,
+    icon: Option<&str>,
+) -> Result<ScenarioRecord, AppError> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err(AppError::invalid_input("Preset name cannot be empty"));
+    }
+
+    let now = chrono::Utc::now().timestamp_millis();
+    let id = uuid::Uuid::new_v4().to_string();
+    let record = ScenarioRecord {
+        id: id.clone(),
+        name: name.to_string(),
+        description: description
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string),
+        icon: icon
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string),
+        sort_order: 999,
+        created_at: now,
+        updated_at: now,
+    };
+
+    sync_metadata::with_repo_lock("create preset", || {
+        store.insert_scenario(&record)?;
+        sync_metadata::write_all_from_db_unlocked(store)
+    })
+    .map_err(AppError::db)?;
+    Ok(record)
+}
+
+/// Preserve the desktop app's legacy create-and-select behavior while the CLI
+/// uses [`create_preset_internal`] as a pure organization operation.
+fn create_and_activate_preset_internal(
+    store: &SkillStore,
+    name: &str,
+    description: Option<&str>,
+    icon: Option<&str>,
+) -> Result<ScenarioRecord, AppError> {
+    let previous_active_id = store.get_active_scenario_id().map_err(AppError::db)?;
+    let record = create_preset_internal(store, name, description, icon)?;
+    if let Some(previous_id) = previous_active_id.as_deref() {
+        unsync_scenario_skills(store, previous_id)?;
+    }
+    store
+        .set_active_scenario(&record.id)
+        .map_err(AppError::db)?;
+    Ok(record)
 }
 
 #[tauri::command]
@@ -167,17 +183,34 @@ pub async fn update_preset(
 ) -> Result<(), AppError> {
     let store = store.inner().clone();
     let result = tauri::async_runtime::spawn_blocking(move || {
-        sync_metadata::with_repo_lock("update scenario", || {
-            store.update_scenario(&id, &name, description.as_deref(), icon.as_deref())?;
-            sync_metadata::write_all_from_db_unlocked(&store)
-        })
-        .map_err(AppError::db)
+        update_preset_internal(&store, &id, &name, description.as_deref(), icon.as_deref())
     })
     .await?;
     if result.is_ok() {
         refresh_tray_menu_best_effort(&app);
     }
     result
+}
+
+pub fn update_preset_internal(
+    store: &SkillStore,
+    id: &str,
+    name: &str,
+    description: Option<&str>,
+    icon: Option<&str>,
+) -> Result<(), AppError> {
+    scenario_service::ensure_scenario_exists(store, id)?;
+    let name = name.trim();
+    if name.is_empty() {
+        return Err(AppError::invalid_input("Preset name cannot be empty"));
+    }
+    let description = description.map(str::trim).filter(|value| !value.is_empty());
+    let icon = icon.map(str::trim).filter(|value| !value.is_empty());
+    sync_metadata::with_repo_lock("update preset", || {
+        store.update_scenario(id, name, description, icon)?;
+        sync_metadata::write_all_from_db_unlocked(store)
+    })
+    .map_err(AppError::db)
 }
 
 #[tauri::command]
@@ -188,39 +221,66 @@ pub async fn delete_preset(
 ) -> Result<(), AppError> {
     let store = store.inner().clone();
     let result = tauri::async_runtime::spawn_blocking(move || {
-        let was_active = store
-            .get_active_scenario_id()
-            .map_err(AppError::db)?
-            .as_deref()
-            == Some(id.as_str());
-
-        if was_active {
-            unsync_scenario_skills(&store, &id)?;
-        }
-
-        sync_metadata::with_repo_lock("delete scenario", || {
-            store.delete_scenario(&id)?;
-            sync_metadata::write_all_from_db_unlocked(&store)
-        })
-        .map_err(AppError::db)?;
-
-        if was_active {
-            let remaining = store.get_all_scenarios().map_err(AppError::db)?;
-            if let Some(first) = remaining.first() {
-                store.set_active_scenario(&first.id).map_err(AppError::db)?;
-                sync_scenario_skills(&store, &first.id)?;
-            } else {
-                store.clear_active_scenario().map_err(AppError::db)?;
-            }
-        }
-
-        Ok(())
+        delete_preset_with_active_fallback_internal(&store, &id)
     })
     .await?;
     if result.is_ok() {
         refresh_tray_menu_best_effort(&app);
     }
     result
+}
+
+pub fn delete_preset_internal(store: &SkillStore, id: &str) -> Result<(), AppError> {
+    scenario_service::ensure_scenario_exists(store, id)?;
+    let was_active = store
+        .get_active_scenario_id()
+        .map_err(AppError::db)?
+        .as_deref()
+        == Some(id);
+
+    sync_metadata::with_repo_lock("delete preset", || {
+        if was_active {
+            store.clear_active_scenario()?;
+        }
+        store.delete_scenario(id)?;
+        sync_metadata::write_all_from_db_unlocked(store)
+    })
+    .map_err(AppError::db)
+}
+
+/// Preserve the desktop app's legacy active-preset transition. The CLI calls
+/// [`delete_preset_internal`] directly so deleting an organization object does
+/// not implicitly undeploy skills.
+fn delete_preset_with_active_fallback_internal(
+    store: &SkillStore,
+    id: &str,
+) -> Result<(), AppError> {
+    scenario_service::ensure_scenario_exists(store, id)?;
+    let was_active = store
+        .get_active_scenario_id()
+        .map_err(AppError::db)?
+        .as_deref()
+        == Some(id);
+
+    if was_active {
+        unsync_scenario_skills(store, id)?;
+    }
+
+    delete_preset_internal(store, id)?;
+
+    if was_active {
+        let remaining = store.get_all_scenarios().map_err(AppError::db)?;
+        if let Some(first) = remaining.first() {
+            store.set_active_scenario(&first.id).map_err(AppError::db)?;
+            // The preset is already deleted and the fallback already active, so
+            // a refusal here cannot undo any of that — report it, don't fail.
+            for refusal in sync_scenario_skills(store, &first.id)? {
+                log::warn!("fallback preset sync skipped a target: {refusal}");
+            }
+        }
+    }
+
+    Ok(())
 }
 
 /// Apply a preset to the default targets (all enabled agent globals).
@@ -259,10 +319,14 @@ async fn apply_preset_to_default_impl(
         scenario_service::apply_scenario_to_default(&store, &id)
     })
     .await?;
-    if result.is_ok() {
-        refresh_tray_menu_best_effort(&app);
-    }
-    result
+    // Refresh even on failure. `apply_scenario_to_default` commits the active
+    // preset before syncing, and syncing now reports ownership refusals as an
+    // error (#363) — so an error here still means the preset switched and most
+    // skills deployed. Gating the refresh on success would leave the tray
+    // showing the old preset while the app is on the new one. Failures that
+    // happen before the switch make this a harmless no-op refresh.
+    refresh_tray_menu_best_effort(&app);
+    result.and_then(scenario_service::refusals_to_error)
 }
 
 #[tauri::command]
@@ -274,11 +338,7 @@ pub async fn add_skill_to_preset(
 ) -> Result<(), AppError> {
     let store = store.inner().clone();
     let result = tauri::async_runtime::spawn_blocking(move || {
-        sync_metadata::with_repo_lock("add skill to scenario", || {
-            store.add_skill_to_scenario(&preset_id, &skill_id)?;
-            sync_metadata::write_all_from_db_unlocked(&store)
-        })
-        .map_err(AppError::db)?;
+        set_preset_skills_internal(&store, &preset_id, &[skill_id], true)?;
         // Membership-only edit. We intentionally do NOT sync to disk here,
         // even when this preset happens to be the legacy `active_scenario_id`,
         // because in the post-v1.16 model presets are curation labels, not
@@ -302,11 +362,7 @@ pub async fn remove_skill_from_preset(
 ) -> Result<(), AppError> {
     let store = store.inner().clone();
     let result = tauri::async_runtime::spawn_blocking(move || {
-        sync_metadata::with_repo_lock("remove skill from scenario", || {
-            store.remove_skill_from_scenario(&preset_id, &skill_id)?;
-            sync_metadata::write_all_from_db_unlocked(&store)
-        })
-        .map_err(AppError::db)?;
+        set_preset_skills_internal(&store, &preset_id, &[skill_id], false)?;
         // Same rationale as add_skill_to_preset: editing preset membership
         // never wipes on-disk skill targets. To remove a skill from a coding
         // agent the caller goes through PresetBar / the tray (or the explicit
@@ -318,6 +374,38 @@ pub async fn remove_skill_from_preset(
         refresh_tray_menu_best_effort(&app);
     }
     result
+}
+
+/// Add or remove a pre-resolved set of skills from one preset under the repo
+/// lock. Membership edits are curation-only and deliberately do not deploy.
+pub fn set_preset_skills_internal(
+    store: &SkillStore,
+    preset_id: &str,
+    skill_ids: &[String],
+    add: bool,
+) -> Result<(), AppError> {
+    scenario_service::ensure_scenario_exists(store, preset_id)?;
+    sync_metadata::with_repo_lock(
+        if add {
+            "add skills to preset"
+        } else {
+            "remove skills from preset"
+        },
+        || {
+            for skill_id in skill_ids {
+                if store.get_skill_by_id(skill_id)?.is_none() {
+                    return Err(anyhow::anyhow!("Skill not found: {skill_id}"));
+                }
+                if add {
+                    store.add_skill_to_scenario(preset_id, skill_id)?;
+                } else {
+                    store.remove_skill_from_scenario(preset_id, skill_id)?;
+                }
+            }
+            sync_metadata::write_all_from_db_unlocked(store)
+        },
+    )
+    .map_err(AppError::db)
 }
 
 #[tauri::command]
@@ -374,7 +462,10 @@ pub async fn reorder_preset_skills(
 
 // ── Internal helpers ──
 
-pub(crate) fn sync_scenario_skills(store: &SkillStore, scenario_id: &str) -> Result<(), AppError> {
+pub(crate) fn sync_scenario_skills(
+    store: &SkillStore,
+    scenario_id: &str,
+) -> Result<Vec<scenario_service::TargetConflict>, AppError> {
     scenario_service::sync_scenario_skills(store, scenario_id)
 }
 
@@ -448,11 +539,39 @@ mod tests {
     };
     use crate::core::skill_store::SkillRecord;
     use crate::core::tool_adapters::{self, CustomToolDef};
-    use std::path::PathBuf;
     use std::fs;
     #[cfg(unix)]
     use std::os::unix::fs::MetadataExt;
+    use std::path::PathBuf;
+    use std::sync::MutexGuard;
     use tempfile::tempdir;
+    use tempfile::TempDir;
+
+    struct MetadataTestRepo {
+        _lock: MutexGuard<'static, ()>,
+        _tmp: TempDir,
+        store: SkillStore,
+    }
+
+    impl Drop for MetadataTestRepo {
+        fn drop(&mut self) {
+            crate::core::central_repo::set_test_base_dir_override(None);
+        }
+    }
+
+    fn metadata_test_repo() -> MetadataTestRepo {
+        let lock = crate::core::central_repo::test_base_dir_lock();
+        let tmp = tempdir().unwrap();
+        let base = tmp.path().join("repo");
+        crate::core::central_repo::set_test_base_dir_override(Some(base.clone()));
+        fs::create_dir_all(crate::core::central_repo::skills_dir()).unwrap();
+        let store = SkillStore::new(&base.join("test.db")).unwrap();
+        MetadataTestRepo {
+            _lock: lock,
+            _tmp: tmp,
+            store,
+        }
+    }
 
     fn sample_skill(id: &str, name: &str, central_path: &std::path::Path) -> SkillRecord {
         SkillRecord {
@@ -521,6 +640,36 @@ mod tests {
                 &serde_json::to_string(&disabled_builtin_tools).unwrap(),
             )
             .unwrap();
+    }
+
+    #[test]
+    fn organization_crud_does_not_switch_or_deploy_presets() {
+        let repo = metadata_test_repo();
+        repo.store
+            .insert_scenario(&sample_scenario("current", "Current"))
+            .unwrap();
+        repo.store.set_active_scenario("current").unwrap();
+
+        let created =
+            create_preset_internal(&repo.store, "  Web Dev  ", Some(" Frontend work "), None)
+                .unwrap();
+        assert_eq!(created.name, "Web Dev");
+        assert_eq!(created.description.as_deref(), Some("Frontend work"));
+        assert_eq!(
+            repo.store.get_active_scenario_id().unwrap().as_deref(),
+            Some("current")
+        );
+        assert!(repo.store.get_all_targets().unwrap().is_empty());
+
+        delete_preset_internal(&repo.store, &created.id).unwrap();
+        assert_eq!(
+            repo.store.get_active_scenario_id().unwrap().as_deref(),
+            Some("current")
+        );
+
+        delete_preset_internal(&repo.store, "current").unwrap();
+        assert_eq!(repo.store.get_active_scenario_id().unwrap(), None);
+        assert!(repo.store.get_all_targets().unwrap().is_empty());
     }
 
     #[cfg(unix)]

@@ -8,6 +8,7 @@ import {
   Copy,
   Settings2,
   Github,
+  Globe,
   Loader2,
   ExternalLink,
   Sun,
@@ -216,6 +217,7 @@ export function Settings() {
   const [activeSection, setActiveSection] = useState<SettingsSectionId>("agents");
 
   const GITHUB_URL = "https://github.com/xingkongliang/skills-manager";
+  const WEBSITE_URL = "https://skillsmanager.dev";
 
   const settingsNavigation = [
     { id: "agents" as const, label: t("settings.builtInAgents") },
@@ -1927,6 +1929,13 @@ export function Settings() {
                   <FileArchive className="w-3 h-3" />
                 )}
                 {t("settings.exportLogs")}
+              </button>
+              <button
+                type="button"
+                onClick={() => { openUrl(WEBSITE_URL).catch(() => {}); }}
+                className={`${actionButtonClass} bg-surface-hover hover:bg-surface-active text-tertiary border-border`}
+              >
+                <Globe className="w-3 h-3" /> {t("settings.website")}
               </button>
               <button
                 type="button"

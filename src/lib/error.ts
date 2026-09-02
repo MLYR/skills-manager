@@ -8,10 +8,12 @@ export const ERROR_KINDS = [
   "invalid_input",
   "cancelled",
   "internal",
+  "target_conflict",
 ] as const;
 
 export type ErrorKind = (typeof ERROR_KINDS)[number];
 
+/** AI 解读错误类型：稳定恢复元数据，UI 决策不得解析 message。 */
 export const AI_ERROR_KINDS = [
   "validation",
   "configuration",
@@ -59,10 +61,23 @@ export const AI_ERROR_CODES = [
 export type AiErrorKind = (typeof AI_ERROR_KINDS)[number];
 export type AiErrorCode = (typeof AI_ERROR_CODES)[number];
 
+/** A deployment target that is not ours to replace (#363). Nothing at these
+ *  paths was touched. */
+export interface TargetConflictDetail {
+  path: string;
+  reason: string;
+}
+
+export interface TargetConflictDetails {
+  conflicts: TargetConflictDetail[];
+}
+
 /** Structured error returned by Tauri commands. */
 export interface AppError {
   kind: ErrorKind;
   message: string;
+  /** Present only for kinds that carry machine-readable specifics. */
+  details?: TargetConflictDetails;
 }
 
 /** Structured error returned only by AI commands. */

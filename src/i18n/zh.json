@@ -81,6 +81,18 @@
     "installNew": "安装新 Skills",
     "recentActivity": "近期动态"
   },
+  "agentControl": {
+    "title": "让你的 Agent 管理 Skills",
+    "body": "让 Claude Code、Codex 等直接替你安装和部署 Skill，来源与部署状态仍由 Skills Manager 记录。",
+    "cta": "去启用",
+    "pickAgents": "让哪些 Agent 可以这么做",
+    "confirm": "为 {{count}} 个启用",
+    "confirmEmpty": "选择 Agent",
+    "dismiss": "不再提示",
+    "done": "{{count}} 个 Agent 现在可以管理你的 Skill 了",
+    "errorNotFound": "管理 Skill 已安装，但在技能库里找不到它。",
+    "errorGeneric": "启用失败。"
+  },
   "backup": {
     "title": "备份",
     "subtitle": "连接一次后，就可以在一个页面完成备份、恢复和断开。",
@@ -489,7 +501,10 @@
       "relinked": "已重新关联原路径",
       "detachSource": "转为本地副本",
       "detachedSource": "已取消原路径追踪",
-      "alreadyUpToDate": "Skill 内容未变化（版本已同步）"
+      "alreadyUpToDate": "Skill 内容未变化（版本已同步）",
+      "removalTitle": "这次更新会删除文件",
+      "removalMessage": "更新 {{name}} 会移除 {{count}} 个新版本里没有的文件。如果其中有你自己的东西，先把它移到 skill 文件夹以外——目前还没有任何改动。",
+      "removalConfirm": "仍然更新"
     },
     "gitConfigEntry": "同步配置",
     "filters": {
@@ -551,7 +566,8 @@
       "addButton": "添加",
       "clickToRemove": "点击标记为移除",
       "undoRemove": "点击保留此标签"
-    }
+    },
+    "batchHeldBack": "有 {{count}} 个 skill 未更新——更新会删除文件（{{names}}）。逐个更新可以看到具体是哪些。"
   },
   "install": {
     "title": "安装 Skills",
@@ -732,8 +748,9 @@
     "textSizeXLarge": "特大",
     "language": "语言",
     "help": "帮助",
+    "website": "官网",
     "about": "关于",
-    "version": "Skills Manager 1.30.0",
+    "version": "Skills Manager 1.36.0",
     "tagline": "跨平台。极简、高效、无感多 Preset 切换。",
     "checkUpdate": "检查更新",
     "checking": "检查中…",
@@ -1100,6 +1117,8 @@
     "importToCenterSuccess": "\"{{name}}\" 已更新到 Skills 中心",
     "importFromCenterSuccess": "\"{{name}}\" 已添加到项目的 {{count}} 个 Agent",
     "updateCenterSuccess": "\"{{name}}\" 已更新到 Skills 中心",
+    "updateCenterConflict": "\"{{name}}\"：{{count}} 个变体可能各有独有内容——请先整理成一份再更新中心。本次未做任何写入。",
+    "updateCenterAlignFailed": "\"{{name}}\"：已推送到中心，但 {{count}} 个变体对齐失败",
     "updateProjectSuccess": "\"{{name}}\" 已更新到项目",
     "resetFromCenter": "恢复中心版本",
     "resetFromCenterSuccess": "\"{{name}}\" 已恢复为中心版本",
@@ -1172,7 +1191,8 @@
     "batchUpdateProject": "更新项目 ({{count}})",
     "batchUpdatedCenter": "已更新 {{count}} 个 Skill 到 Skills 中心",
     "batchUpdatedProject": "已更新项目中的 {{count}} 个 Skill",
-    "batchUpdateCenterFailed": "{{count}} 个 Skill 更新到 Skills 中心失败",
+    "batchUpdateCenterFailed": "{{count}} 个 Skill 未能完成到 Skills 中心的更新",
+    "batchUpdateCenterConflict": "{{count}} 个 Skill 有多个变体可能各有独有内容，未做处理",
     "batchUpdateProjectFailed": "{{count}} 个 Skill 更新到项目失败",
     "skillDirectoryNotFound": "未找到 Skill 目录",
     "batchEditTags": "标签 ({{count}})",
