@@ -1,6 +1,6 @@
 # AI 解读开发进度
 
-更新时间：2026-08-03
+更新时间：2026-09-20
 当前状态：全部阶段已完成（AI解读第一版闭环）
 已验收进度：100%
 
@@ -557,7 +557,7 @@
 
 验收：Schema 占位词拒绝测试 5 passed、提示词测试 2 passed、AI Commands 测试 14 passed；完整 `rtk cargo test --manifest-path src-tauri/Cargo.toml`通过（498项）；`rtk cargo check --manifest-path src-tauri/Cargo.toml`、`rtk npx tsc -b --pretty false`、`rtk npm run lint`、相关 Rust `rustfmt --check`及`rtk git diff --check`均通过。验收结论：主会话自审通过。
 
-## 28. 同步上游 v1.40.0：迁移编号调整与冲突处理（2026-08-06，待验收）
+## 28. 同步上游 v1.40.0：迁移编号调整与冲突处理（2026-09-20，已完成）
 
 用户要求拉取并合并上游 `xingkongliang/skills-manager` 的 43 个提交（v1.36.0 → v1.40.0），并保证 AI 解读功能不受影响。三处文本冲突只有 `src-tauri/src/core/migrations.rs` 触及 AI 契约：上游 v1.36.1 与本分支都把新增迁移放在 v7→v8，上游用它清理孤儿偏好 `project_default_export_agents`，本分支用它建 AI 解读四张表。
 
@@ -566,3 +566,12 @@
 另外两处冲突：`src-tauri/src/core/git_fetcher.rs` 上游把 clone 函数体拆成 scoped/sparse/full 多条路径，本分支的进度节流回调改在公开入口 `clone_repo_ref_with_progress` 包装，覆盖全部路径；`src/views/WorkspaceView.tsx` 四处冲突均为双方各自新增，AI 摘要展示、本分支卡片样式与上游多选 `ring`/`leadingSlot` 合并保留。
 
 范围：仅上述冲突文件、`docs/ai-analysis/03-progress.md`。未修改其它文件，未重构，未格式化。
+
+验证结果（主会话自审，2026-09-20）：
+
+- `cargo test --manifest-path src-tauri/Cargo.toml`：609 passed / 0 failed / 6 ignored，另 4 项集成测试通过；其中 `core::migrations` 10 项（含新增的 `upstream_v8_database_gains_the_ai_schema`）与 `core::ai`、`commands::ai` 共 88 项全部通过。
+- 端到端迁移验证：用真实库副本（迁移前 `user_version=8`，47 条解读结果、44 个批次、185 个任务、36 条日志）由新构建的 1.40.0 CLI 打开，升到 `user_version=9`，四张 AI 表行数、`ai_analysis_config_v1` 与 45 个 Skill 全部保留，解读结果可正常读出。
+- `npx tsc -b --pretty false` 无错误；`npx eslint .` 无问题；三语 i18n 的 `settings.ai` 92 键、`ai` 96 键与合并前一致且三语同构，键零丢失。
+- `npm run tauri:build` 产出 `skills-manager.app` 与 `skills-manager_1.40.0_aarch64.dmg`（19.7MB）；dmg 可正常挂载，内部 app 版本 1.40.0，二进制 sha256 与 bundle 内一致。
+- 两条与本功能无关的既有情况，仅登记不处理：本机 rustfmt 1.97 下全仓有 264 处历史格式差异，合并前的 main 同样存在（`git_backup.rs` 14 处、`skills-manager-cli.rs` 3 处、`agent_workspace.rs` 3 处），因此 `rustfmt --check` 在本机不能作为验收门；`core/ai/repository.rs:1738` 的 `unused variable: repository` 警告在合并前已存在。
+- 构建环境说明：官方 crates.io 源在当前网络下只剩约 20KB/s，本次构建临时把 cargo 源替换为中科大镜像（`~/.cargo/config.toml`，稀疏索引 `sparse+https://mirrors.ustc.edu.cn/crates.io-index/`）。移除该文件即回到官方源，但下次构建需要重新下载依赖。
