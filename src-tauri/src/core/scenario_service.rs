@@ -716,6 +716,69 @@ pub enum DeployIntent {
     AdoptExisting,
 }
 
+/// Re-point every `source_ref` that names `target` at the referring skill's own
+/// central copy, ahead of an adoption that replaces `target` with a managed
+/// deployment (#425).
+///
+/// An adopted directory stops being an independent copy the moment the
+/// adoption runs: it becomes a link to (or copy of) central that can be
+/// removed at any time — by the agent's own skill management cleaning up what
+/// it does not recognize, or by a later undeploy. A skill whose `source_ref`
+/// still names that directory then fails its update check with
+/// `source_missing` forever, even though the central copy is intact.
+///
+/// The central copy always exists while the skill row does, so re-pointing
+/// keeps the source resolvable; the content-hash comparison against it keeps
+/// reporting `up_to_date`. Matching is by exact string or canonicalized path,
+/// because import records can spell the same directory with mixed separators
+/// than the deployment target computed from the adapter.
+pub(crate) fn detach_source_refs_from_adoption_target(
+    store: &SkillStore,
+    target: &Path,
+) -> Result<(), AppError> {
+    let target_str = target.to_string_lossy().into_owned();
+    // `canonicalize` resolves through symlinks, but a symlinked target is only
+    // unlinked by the replacement below (`remove_classified_target` treats
+    // LinkToSource/ForeignLink as `remove_link`) -- whatever it pointed at
+    // survives untouched. Resolving through the link would re-point the
+    // source_ref of a directory that is still on disk and still the user's
+    // source of truth, and the update check would then compare central to
+    // itself forever. An exact string match still applies: if the source_ref
+    // *is* the link path, that link really is going away.
+    let target_canonical = if std::fs::symlink_metadata(target)
+        .map(|meta| meta.file_type().is_symlink())
+        .unwrap_or(false)
+    {
+        None
+    } else {
+        std::fs::canonicalize(target).ok()
+    };
+    for skill in store.get_all_skills().map_err(AppError::db)? {
+        let Some(source_ref) = skill.source_ref.as_deref() else {
+            continue;
+        };
+        // Already re-pointed by a previous adoption — nothing to do.
+        if source_ref == skill.central_path {
+            continue;
+        }
+        let points_at_target = source_ref == target_str
+            || target_canonical.as_ref().is_some_and(|canonical| {
+                std::fs::canonicalize(source_ref).is_ok_and(|source| &source == canonical)
+            });
+        if points_at_target {
+            store
+                .update_skill_source_ref(&skill.id, &skill.central_path)
+                .map_err(AppError::db)?;
+            log::info!(
+                "adoption: re-pointed source_ref of skill '{}' at its central copy; \
+                 the adopted agent directory is now a deployment, not a source (#425)",
+                skill.name
+            );
+        }
+    }
+    Ok(())
+}
+
 pub fn sync_single_skill_to_tool(
     store: &SkillStore,
     skill_id: &str,
@@ -765,6 +828,13 @@ pub fn sync_single_skill_to_tool(
         DeployIntent::AdoptExisting => sync_engine::ReplacePolicy::UserConfirmed,
         DeployIntent::Managed => replace_policy(recorded_mode.as_deref()),
     };
+    if matches!(intent, DeployIntent::AdoptExisting) {
+        // The directory at `target` may still be the import source of the very
+        // skill being deployed (or of a sibling record): re-point those at
+        // central BEFORE the replacement, so a failure partway through the
+        // adoption can never leave a dangling source behind (#425).
+        detach_source_refs_from_adoption_target(store, &target)?;
+    }
     let actual_mode = sync_engine::sync_skill(&source, &target, mode, policy).map_err(AppError::io)?;
 
     let now = chrono::Utc::now().timestamp_millis();
@@ -1553,6 +1623,81 @@ mod sync_desired_targets_tests {
 
         // Sync must have run — target should now exist with the source content.
         assert!(target.join("SKILL.md").exists(), "missing target was not re-synced");
+
+        central_repo::set_test_base_dir_override(None);
+    }
+
+    /// `canonicalize` resolves through symlinks, but the replacement that
+    /// follows an adoption does not: a symlinked target is only unlinked, so
+    /// whatever it pointed at survives. Re-pointing on the resolved path would
+    /// silently orphan a directory that is still on disk and still the user's
+    /// source of truth -- later edits in it would never be seen again (#425).
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_adoption_target_does_not_detach_the_directory_it_points_at() {
+        let _lock = central_repo::test_base_dir_lock();
+        let tmp = tempdir().unwrap();
+        let base = tmp.path().join("repo");
+        central_repo::set_test_base_dir_override(Some(base.clone()));
+        fs::create_dir_all(central_repo::skills_dir()).unwrap();
+        let store = SkillStore::new(&base.join("test.db")).unwrap();
+
+        let central = central_repo::skills_dir().join("jira");
+        fs::create_dir_all(&central).unwrap();
+        fs::write(central.join("SKILL.md"), "central copy").unwrap();
+
+        // The folder the skill was imported from: still the user's source.
+        let import_src = tmp.path().join("claude").join("skills").join("jira");
+        fs::create_dir_all(&import_src).unwrap();
+        fs::write(import_src.join("SKILL.md"), "user copy").unwrap();
+
+        // Another agent's skills dir holds a symlink to that same folder.
+        let link = tmp.path().join("duo").join("skills").join("jira");
+        fs::create_dir_all(link.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&import_src, &link).unwrap();
+
+        store
+            .insert_skill(&SkillRecord {
+                id: "jira".to_string(),
+                name: "jira".to_string(),
+                description: None,
+                source_type: "import".to_string(),
+                source_ref: Some(import_src.to_string_lossy().to_string()),
+                source_ref_resolved: None,
+                source_subpath: None,
+                source_branch: None,
+                source_revision: None,
+                remote_revision: None,
+                central_path: central.to_string_lossy().to_string(),
+                content_hash: Some("h1".to_string()),
+                enabled: true,
+                created_at: 1,
+                updated_at: 1,
+                status: "ok".to_string(),
+                update_status: "local_only".to_string(),
+                last_checked_at: None,
+                last_check_error: None,
+            })
+            .unwrap();
+
+        // Adopting the link must leave the pointee's source_ref alone.
+        detach_source_refs_from_adoption_target(&store, &link).unwrap();
+        let after = store.get_skill_by_id("jira").unwrap().unwrap();
+        assert_eq!(
+            after.source_ref.as_deref(),
+            Some(import_src.to_string_lossy().as_ref()),
+            "a symlinked target detached the real directory it points at"
+        );
+
+        // But adopting the real directory still detaches it: that one is
+        // about to be replaced by a deployment.
+        detach_source_refs_from_adoption_target(&store, &import_src).unwrap();
+        let after = store.get_skill_by_id("jira").unwrap().unwrap();
+        assert_eq!(
+            after.source_ref.as_deref(),
+            Some(central.to_string_lossy().as_ref()),
+            "adopting the real source dir no longer re-points source_ref"
+        );
 
         central_repo::set_test_base_dir_override(None);
     }

@@ -443,7 +443,7 @@
     "sourceType": "Source type",
     "sourceRef": "Source",
     "sourceResolved": "Resolved source",
-    "sourceBranch": "Branch",
+    "sourceBranch": "Branch / Tag",
     "sourceSubpath": "Subpath",
     "sourceRevision": "Revision",
     "docTabs": {
@@ -567,7 +567,17 @@
       "clickToRemove": "Click to mark for removal",
       "undoRemove": "Click to keep this tag"
     },
-    "batchHeldBack": "{{count}} skill(s) were left alone — updating them would remove files ({{names}}). Update them one at a time to see what."
+    "batchHeldBack": "{{count}} skill(s) were left alone — updating them would remove files ({{names}}). Update them one at a time to see what.",
+    "batchSyncAgents": "Sync to agents ({{count}})",
+    "batchSynced": "Synced {{count}} skill targets",
+    "batchSyncFailed": "{{count}} targets failed to sync",
+    "batchSyncDialog": {
+      "title": "Sync {{count}} skills to agents",
+      "description": "Pick the target agents. Only skills that are not there yet are added — unsync one at a time from the agent dots on a card.",
+      "apply": "Sync {{count}}",
+      "noAgents": "No installed and enabled agents.",
+      "allSynced": "Every selected skill is already on this agent"
+    }
   },
   "install": {
     "title": "Install Skills",
@@ -750,7 +760,7 @@
     "help": "Help",
     "website": "Website",
     "about": "About",
-    "version": "Skills Manager 1.36.0",
+    "version": "Skills Manager 1.40.0",
     "tagline": "Cross-platform. Minimal, efficient, seamless multi-preset switching.",
     "checkUpdate": "Check for Updates",
     "checking": "Checking…",
@@ -1023,6 +1033,10 @@
     "noTargetSelected": "no target",
     "changeTarget": "Change target",
     "selectAllTargets": "Select all",
+    "selectAllSkills": "Select all skills",
+    "deselectAllSkills": "Deselect all skills",
+    "selectedCount": "{{count}} selected",
+    "shiftHint": "Shift + click to select a range",
     "clearTargets": "Clear",
     "searchPlaceholder": "Search the library…",
     "emptyLibrary": "Your library is empty",
@@ -1197,7 +1211,8 @@
     "skillDirectoryNotFound": "Skill directory not found",
     "batchEditTags": "Tags ({{count}})",
     "batchTagsUpdated": "Tags updated for {{count}} center skills",
-    "batchTagsFailed": "{{count}} center skills failed to update tags"
+    "batchTagsFailed": "{{count}} center skills failed to update tags",
+    "batchTagScopeNote": "Tags live in the central library, so edits affect every project using these skills. Project-only local skills are left untouched."
   },
   "presetActions": {
     "button": "Apply Preset",
@@ -1293,7 +1308,11 @@
         "localNewer": "Local changed",
         "centerNewer": "Center changed",
         "diverged": "Conflict"
-      }
+      },
+      "deleteLocalSelected": "Delete {{count}} permanently",
+      "deleteLocalBatchConfirm": "Permanently delete {{count}} local skills from {{agent}}? They exist only in this agent’s folder and cannot be recovered.",
+      "deletedLocalBatch": "{{count}} local skills deleted",
+      "deleteLocalBatchFailed": "{{count}} local skills failed to delete"
     }
   }
 }

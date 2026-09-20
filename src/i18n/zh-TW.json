@@ -524,7 +524,17 @@
     "batchDisable": "停用 {{count}} 個",
     "batchEnabled": "已啟用 {{count}} 個 Skill",
     "batchDisabled": "已停用 {{count}} 個 Skill",
-    "batchHeldBack": "有 {{count}} 個 skill 未更新——更新會刪除檔案（{{names}}）。逐個更新可以看到具體是哪些。"
+    "batchHeldBack": "有 {{count}} 個 skill 未更新——更新會刪除檔案（{{names}}）。逐個更新可以看到具體是哪些。",
+    "batchSyncAgents": "同步到 Agent ({{count}})",
+    "batchSynced": "已同步 {{count}} 項到 Agent",
+    "batchSyncFailed": "{{count}} 項同步失敗",
+    "batchSyncDialog": {
+      "title": "把 {{count}} 個 Skill 同步到 Agent",
+      "description": "勾選目標 Agent，只會補齊尚未同步的 Skill。取消同步請在卡片的 Agent 圖示上單獨操作。",
+      "apply": "同步 {{count}} 項",
+      "noAgents": "沒有已安裝並啟用的 Agent。",
+      "allSynced": "選取的 Skill 都已同步到這個 Agent"
+    }
   },
   "install": {
     "title": "安裝 Skills",
@@ -701,7 +711,7 @@
     "help": "說明",
     "website": "官網",
     "about": "關於",
-    "version": "Skills Manager 1.36.0",
+    "version": "Skills Manager 1.40.0",
     "tagline": "跨平台。極簡、高效、無感多 Preset 切換。",
     "checkUpdate": "檢查更新",
     "checking": "檢查中…",
@@ -950,6 +960,10 @@
     "noTargetSelected": "未選擇",
     "changeTarget": "更換目標",
     "selectAllTargets": "全選",
+    "selectAllSkills": "全選技能",
+    "deselectAllSkills": "取消全選",
+    "selectedCount": "已選 {{count}} 個",
+    "shiftHint": "按住 Shift 點擊可批量選擇",
     "clearTargets": "清空",
     "searchPlaceholder": "搜尋技能庫…",
     "emptyLibrary": "技能庫為空",
@@ -1113,7 +1127,8 @@
     "skillDirectoryNotFound": "找不到 Skill 目錄",
     "batchEditTags": "標籤 ({{count}})",
     "batchTagsUpdated": "已更新 {{count}} 個中心 Skill 的標籤",
-    "batchTagsFailed": "{{count}} 個中心 Skill 標籤更新失敗"
+    "batchTagsFailed": "{{count}} 個中心 Skill 標籤更新失敗",
+    "batchTagScopeNote": "標籤儲存在中央技能庫，改動會影響所有使用這個 Skill 的專案。只屬於本專案的本機 Skill 不會被修改。"
   },
   "presetActions": {
     "button": "套用 Preset",
@@ -1209,7 +1224,11 @@
         "localNewer": "本機有變更",
         "centerNewer": "中心有變更",
         "diverged": "衝突"
-      }
+      },
+      "deleteLocalSelected": "永久刪除 {{count}} 個",
+      "deleteLocalBatchConfirm": "永久刪除 {{agent}} 裡的 {{count}} 個本機 Skill？這些 Skill 只存在於該 Agent 目錄，刪除後無法復原。",
+      "deletedLocalBatch": "已刪除 {{count}} 個本機 Skill",
+      "deleteLocalBatchFailed": "{{count}} 個本機 Skill 刪除失敗"
     }
   }
 }

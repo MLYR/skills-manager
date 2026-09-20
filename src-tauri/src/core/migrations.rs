@@ -2,7 +2,7 @@ use anyhow::{bail, Context, Result};
 use rusqlite::Connection;
 
 /// Current schema version. Bump this when adding a new migration.
-const LATEST_VERSION: u32 = 8;
+const LATEST_VERSION: u32 = 9;
 
 /// Run all pending migrations on the database.
 ///
@@ -96,6 +96,7 @@ fn migrate_step(conn: &Connection, from_version: u32) -> Result<()> {
         5 => migrate_v5_to_v6(conn),
         6 => migrate_v6_to_v7(conn),
         7 => migrate_v7_to_v8(conn),
+        8 => migrate_v8_to_v9(conn),
         _ => bail!("unknown migration version: {from_version}"),
     }
 }
@@ -457,6 +458,46 @@ fn migrate_v7_to_v8(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// v8 → v9: drop the orphaned `project_default_export_agents` preference.
+///
+/// It was written behind a "save default agents" action that 688fc9b removed
+/// along with the old Add Skills flow, leaving the reader behind. Users who
+/// used that button still carry a frozen subset they can neither see nor
+/// change, and it silently narrows which agents a project preset reaches —
+/// exactly the failure #400 reported, but invisible and unfixable from the UI.
+/// A preference with no way to inspect or edit it is a trap, not a preference.
+///
+/// 合并上游 v1.40.0 时两侧都占用了 v7→v8：上游 v1.36.1 用它清理上面的孤儿偏好，
+/// 本分支用它建 AI 解读表。AI 表迁移保持在 v7→v8 不动，已升到 8 的库不会重跑建表；
+/// 偏好清理顺延到 v8→v9。但从上游分支升级过来的库 user_version 已是 8 却没有 AI 表，
+/// 所以这里在建表缺失时补跑一次 v7→v8。刻意不用 IF NOT EXISTS：半成品结构仍要报错。
+fn migrate_v8_to_v9(conn: &Connection) -> Result<()> {
+    let has_ai_schema: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'skill_ai_analyses')",
+        [],
+        |row| row.get(0),
+    )?;
+    if !has_ai_schema {
+        migrate_v7_to_v8(conn)?;
+    }
+
+    // A database can reach this step without a settings table (older partial
+    // schemas do), and a cleanup has no business failing an upgrade.
+    let has_settings: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'settings')",
+        [],
+        |row| row.get(0),
+    )?;
+    if !has_settings {
+        return Ok(());
+    }
+    conn.execute(
+        "DELETE FROM settings WHERE key = 'project_default_export_agents'",
+        [],
+    )?;
+    Ok(())
+}
+
 // ── Helpers ──
 
 fn add_column_if_missing(
@@ -560,10 +601,12 @@ mod tests {
 
         run_migrations(&conn).unwrap();
 
+        // 断言到最新版本而不是写死 8：上游的偏好清理占用 v8→v9 后，这里从真实 v7 库
+        // 升上来会停在 9，写死 8 只会变成一条会随版本漂移而误报的断言。
         let version: u32 = conn
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 8);
+        assert_eq!(version, LATEST_VERSION);
 
         let expected_indexes = [
             "ux_skill_ai_analyses_target",
@@ -824,6 +867,70 @@ mod tests {
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
         assert_eq!(version, LATEST_VERSION);
+    }
+
+    #[test]
+    fn orphaned_default_export_agents_setting_is_dropped() {
+        let conn = Connection::open_in_memory().unwrap();
+        // Arrive at v8 the way a real upgrading database does, then plant the
+        // row that the removed UI used to write. v8 is the version right before
+        // this cleanup in the merged numbering; v7→v8 belongs to the AI schema
+        // now and would fail on tables that already exist.
+        conn.pragma_update(None, "user_version", 0).unwrap();
+        run_migrations(&conn).unwrap();
+        conn.pragma_update(None, "user_version", 8).unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO settings (key, value) VALUES ('project_default_export_agents', ?1)",
+            ["[\"claude_code\",\"codex\"]"],
+        )
+        .unwrap();
+        assert_eq!(count_setting(&conn), 1, "precondition: the row must exist, or this test proves nothing");
+
+        run_migrations(&conn).unwrap();
+
+        assert_eq!(count_setting(&conn), 0, "v8→v9 must delete the orphaned preference");
+        // Unrelated settings must survive.
+        conn.execute(
+            "INSERT OR REPLACE INTO settings (key, value) VALUES ('theme', 'dark')",
+            [],
+        )
+        .unwrap();
+        run_migrations(&conn).unwrap();
+        let theme: String = conn
+            .query_row("SELECT value FROM settings WHERE key = 'theme'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(theme, "dark");
+    }
+
+    #[test]
+    fn upstream_v8_database_gains_the_ai_schema() {
+        // 上游 v1.36.1 起 user_version 8 对应的是偏好清理，不是 AI 表。从上游分支
+        // 升级过来的库必须在这一步补上 AI 表，否则 AI 解读在整条路径上永久缺表。
+        let conn = Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+        conn.execute_batch(
+            "DROP TABLE ai_analysis_logs;
+             DROP TABLE ai_analysis_jobs;
+             DROP TABLE ai_analysis_batches;
+             DROP TABLE skill_ai_analyses;",
+        )
+        .unwrap();
+        conn.pragma_update(None, "user_version", 8).unwrap();
+
+        run_migrations(&conn).unwrap();
+
+        assert!(schema_object_exists(&conn, "table", "skill_ai_analyses"));
+        assert!(schema_object_exists(&conn, "table", "ai_analysis_jobs"));
+        assert!(schema_object_exists(&conn, "index", "ux_skill_ai_analyses_target"));
+    }
+
+    fn count_setting(conn: &Connection) -> i64 {
+        conn.query_row(
+            "SELECT COUNT(*) FROM settings WHERE key = 'project_default_export_agents'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap()
     }
 
     #[test]

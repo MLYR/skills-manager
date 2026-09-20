@@ -40,7 +40,7 @@
 
 - 前端为React 19 + TypeScript + Vite + Tailwind CSS。
 - 桌面端为Tauri 2，后端为Rust，数据库为SQLite/rusqlite。
-- 数据库迁移当前`LATEST_VERSION`为8。
+- 数据库迁移当前`LATEST_VERSION`为9；AI 解读表仍由 v7→v8 建立，上游的孤儿偏好清理顺延到 v8→v9（见第28节）。
 - 全局和项目详情页已有本地、差异、中心文档标签。
 - Skill列表当前直接展示原始`description`。
 - 设置使用SQLite键值表；项目已依赖`keyring`，可复用系统钥匙串。
@@ -556,3 +556,13 @@
 用户反馈：AI 解读的“怎么使用”“需要准备什么”“不适用场景”和示例提示词出现重复“原文未说明”，这违背了产品目标——应让 AI 基于主文档整理可用说明。处理结果：提示词改为要求保守归纳，不允许输出该占位文本；无法形成有用条目时返回空数组。Schema 同步拒绝完全等于“原文未说明”的字段/数组项，避免低质量结果保存。历史结果若含该占位词仅标记为待更新，不自动发起请求或产生费用。
 
 验收：Schema 占位词拒绝测试 5 passed、提示词测试 2 passed、AI Commands 测试 14 passed；完整 `rtk cargo test --manifest-path src-tauri/Cargo.toml`通过（498项）；`rtk cargo check --manifest-path src-tauri/Cargo.toml`、`rtk npx tsc -b --pretty false`、`rtk npm run lint`、相关 Rust `rustfmt --check`及`rtk git diff --check`均通过。验收结论：主会话自审通过。
+
+## 28. 同步上游 v1.40.0：迁移编号调整与冲突处理（2026-08-06，待验收）
+
+用户要求拉取并合并上游 `xingkongliang/skills-manager` 的 43 个提交（v1.36.0 → v1.40.0），并保证 AI 解读功能不受影响。三处文本冲突只有 `src-tauri/src/core/migrations.rs` 触及 AI 契约：上游 v1.36.1 与本分支都把新增迁移放在 v7→v8，上游用它清理孤儿偏好 `project_default_export_agents`，本分支用它建 AI 解读四张表。
+
+处理结论：AI 表迁移保持在 v7→v8 不动，已经升到 `user_version=8` 的现有库不会重跑建表；上游的偏好清理顺延为 v8→v9，`LATEST_VERSION` 由 8 改为 9。为兼容从上游分支升级过来的库（`user_version` 已经是 8、却没有 AI 表），v8→v9 在建表缺失时补跑一次 AI 建表，且不使用 `IF NOT EXISTS`：半成品结构仍然要报错，不能被静默放过。上游的 `orphaned_default_export_agents_setting_is_dropped` 夹具改为停在 v8（v7→v8 现在是 AI 建表，重跑会因表已存在而失败），断言文案同步为 v8→v9；新增 `upstream_v8_database_gains_the_ai_schema` 覆盖补建路径。
+
+另外两处冲突：`src-tauri/src/core/git_fetcher.rs` 上游把 clone 函数体拆成 scoped/sparse/full 多条路径，本分支的进度节流回调改在公开入口 `clone_repo_ref_with_progress` 包装，覆盖全部路径；`src/views/WorkspaceView.tsx` 四处冲突均为双方各自新增，AI 摘要展示、本分支卡片样式与上游多选 `ring`/`leadingSlot` 合并保留。
+
+范围：仅上述冲突文件、`docs/ai-analysis/03-progress.md`。未修改其它文件，未重构，未格式化。

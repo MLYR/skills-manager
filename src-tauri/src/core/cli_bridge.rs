@@ -119,11 +119,28 @@ fn invalidate_bridge() -> Result<()> {
     }
 }
 
+/// Build the command that runs the published CLI, without a console window.
+///
+/// The CLI is a console-subsystem binary and the app is not, so spawning it
+/// plainly makes Windows open a console window for it — a black flash on the
+/// first launch after every install (#413). Every other spawn in this crate
+/// hides it the same way; a new one here has to as well.
+fn cli_command(path: &Path) -> Command {
+    #[allow(unused_mut)]
+    let mut cmd = Command::new(path);
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+    }
+    cmd
+}
+
 /// Run the freshly copied binary. A copy that cannot report its own version is
 /// truncated, blocked, or built for another architecture — publishing it would
 /// hand agents a binary that fails on first use.
 fn verify(path: &Path, expected_version: &str) -> Result<()> {
-    let output = Command::new(path)
+    let output = cli_command(path)
         .arg("--version")
         .output()
         .with_context(|| format!("could not run {}", path.display()))?;
