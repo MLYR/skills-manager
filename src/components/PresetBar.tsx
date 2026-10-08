@@ -138,7 +138,7 @@ export function PresetBar({
                 else handleActivate(preset);
               }}
               disabled={busy}
-              title={preset.name}
+              title={preset.description ? `${preset.name} — ${preset.description}` : preset.name}
               className={cn(
                 "inline-flex shrink-0 items-center gap-1 rounded-full border px-2.5 py-0.5 text-[12px] font-medium transition-colors disabled:opacity-50",
                 s.status === "active"

@@ -5,6 +5,52 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.40.3] - 2026-10-02
+
+### Release Overview
+- Fixes for backups that could never sync, an app that quit at launch, and a CLI bridge that never installed on Windows; presets get editable descriptions, and the CLI can register custom agents.
+
+### User-facing
+- **Backup and sync work when git uses its newer "reftable" format** — If your git is set to create reftable repositories, the skills library was created in that format, which Skills Manager cannot read: every sync failed and the repository looked broken (`HEAD` pointing at `refs/heads/.invalid`). New libraries now always use the classic format. An existing reftable library gets a clear message with the command to convert it (Git 2.48+), and automatic backup reports it instead of stopping silently (#504).
+- **The app no longer quits at launch when its sync metadata is empty** — If the metadata in the library listed no skills while skill folders existed, every launch stopped before showing a window (silently on Windows). When the app's database still accounts for every skill folder, the metadata is now rebuilt from it and the app starts normally (#421).
+- **Windows: the CLI bridge installs again** — Copying the bundled `skills-manager-cli.exe` into place failed on every launch with "the file is being used by another process", because Windows briefly keeps a just-run program locked. The app now waits that out (#487).
+- **Presets have an editable description** — "Rename" is now "Edit": you can set or clear a preset's description, shown when hovering the preset in the sidebar and preset bar (#498).
+- **`skills-manager-cli agents add-custom`** — Register a custom agent from the command line. The README has a new section on running the CLI inside WSL to manage agents installed there (#501).
+
+### Developer & Governance
+- Sync metadata's "no skills listed" refusal is a typed error (`EmptySkillMetadata`), so startup can recover from that case alone; the reindex after a backup sync still fails hard.
+- `add_custom_tool_internal` is shared by the GUI command and the CLI.
+## [1.40.2] - 2026-09-30
+
+### Release Overview
+- A batch of small fixes: preset switching, dark-mode diffs, collapsed agent icons, and a false "update available" after installing a skill's dependencies.
+
+### User-facing
+- **Choosing a preset while a skill's details are open now works** — The detail panel stayed on top, so the click looked like it did nothing until a reload. Thanks to @GoodScholar (#491, #485).
+- **Dark mode: the diff view is readable** — Changed lines kept their light red/green backgrounds under near-white text. Thanks to @GoodScholar (#492, #488).
+- **Agents hidden behind `+N` can be toggled** — Clicking `+N` opened the skill's details instead; it now expands the row so every agent can be installed or removed. Thanks to @GoodScholar (#490, #441).
+- **Installing dependencies no longer shows as an update** — Running `npm install` or creating a Python venv in a locally imported skill's source made the update check offer an update. `node_modules`, `.venv` and `venv` are now looked past by that check (#502).
+- **Windows: agent paths display with one separator style** — Paths read like `~\.workbuddy/skills`; display only, the folders were always correct (#495).
+
+### Developer & Governance
+- The dependency-folder skip is confined to the update check's tiebreaker. The content hash itself is unchanged, because repairs that replace a folder when hashes match would otherwise delete a locally installed `node_modules`.
+- The two copies of `compactHomePath` were merged into `src/utils.ts`.
+## [1.40.1] - 2026-09-26
+
+### Release Overview
+- Changing the central repository path now actually takes effect, and several ways a sync could delete or misplace a skill directory are closed.
+
+### User-facing
+- **Changing the central repository path now takes effect** — Saving a new path switched the running app to it immediately while its database stayed at the old location, so the first thing written afterwards (a lock file, an install) landed in the new folder. The move at the next launch only accepts an empty folder, so it refused on every launch from then on, and Settings kept showing the old path. The running app now stays on the current library until you restart; Settings shows where it will move. If you are already stuck, restarting is enough in most cases: leftovers the app recreates by itself (the lock file, empty folders, OS metadata) no longer block the move — anything else still does, and nothing is removed then. After a move, skill links in agent and project folders are pointed at the new location, and a move across drives keeps the old copy renamed to `<name>.moved-<time>` instead of leaving it in place. Thanks to @ZhuYichuan, whose diagnosis in #472 this builds on (#449, #469, #393).
+- **A folder you put in place of a deployed skill is no longer deleted** — Disabling an agent, changing its path, deleting a skill or a custom agent, or unchecking a skill for one agent removed whatever sat at the recorded location without checking it was still ours. They now remove it only while it still matches the deployment. Thanks to @zhirogo (#460, #435).
+- **Importing a nested skill (Hermes categories) keeps its path** — It was imported at a flat top-level name, which could replace a category folder of the same name. Thanks to @GoodScholar (#482, #436).
+- **CLI `--dry-run` reports the conflicts the real run would hit** — `skills deploy`, `presets deploy` and `skills sync` dry runs now run the same ownership check as the real deployment. Thanks to @GoodScholar (#483, #437).
+- **Agents that share a skills folder no longer lose each other's deployments** — Disabling one of them, or unchecking a skill for it, removed the shared copy the other agent still used.
+
+### Developer & Governance
+- Every process that uses the app's library (app, CLI, `--skills-root`) holds a shared lease for its lifetime; moving the library requires it exclusively, so a move can't run under an agent's CLI call or a second launch. Ordinary CLI commands no longer carry out a pending move; `repo set-path` does, unless the app is running, and refuses `--skills-root`.
+- The cross-volume copy recreates symlinks instead of following them, and removes a partial copy on failure so the retry isn't blocked by its own leftovers.
+- `repo status` reports `pending_base_dir` while a move waits for a restart.
 ## [1.40.0] - 2026-09-17
 
 ### Release Overview

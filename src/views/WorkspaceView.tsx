@@ -20,7 +20,7 @@ import {
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
-import { cn } from "../utils";
+import { cn, compactHomePath } from "../utils";
 import { useApp } from "../context/AppContext";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 import { PresetBar } from "../components/PresetBar";
@@ -45,10 +45,6 @@ import { AddSkillsSheet } from "../components/AddSkillsSheet";
 import { useMultiSelect } from "../hooks/useMultiSelect";
 import { MultiSelectToolbar } from "../components/MultiSelectToolbar";
 import type { WorkspaceConfig } from "./workspaceConfigs";
-
-function compactHomePath(path: string) {
-  return path.replace(/^\/Users\/[^/]+/, "~");
-}
 
 function globalSkillAiTarget(skill: ProjectSkill, agentKey: string): AiTargetRef {
   // An in-sync local copy is byte-for-byte the managed Skill, so both detail

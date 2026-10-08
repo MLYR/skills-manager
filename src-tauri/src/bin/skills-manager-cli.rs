@@ -65,6 +65,20 @@ enum ToolsCommand {
         #[arg(required = true)]
         agents: Vec<String>,
     },
+    /// Add a custom agent: a skills folder this app does not know by default
+    AddCustom {
+        /// Unique agent key, e.g. `hermes-work`
+        key: String,
+        /// Agent skills folder, e.g. `~/.hermes/profiles/work/skills`
+        #[arg(long)]
+        path: String,
+        /// Display name (defaults to the key)
+        #[arg(long)]
+        name: Option<String>,
+        /// Project-relative skills folder, e.g. `.hermes/skills`
+        #[arg(long)]
+        project_path: Option<String>,
+    },
 }
 
 #[derive(Args, Debug)]
@@ -387,6 +401,9 @@ struct RepoStatus {
     skill_count: usize,
     preset_count: usize,
     active_preset_id: Option<String>,
+    /// Set while a move to another location waits for the app to restart.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pending_base_dir: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -687,6 +704,25 @@ fn main() {
 }
 
 fn run(cli: Cli) -> anyhow::Result<()> {
+    if let Commands::Repo(RepoArgs {
+        command: command @ (RepoCommand::SetPath { .. } | RepoCommand::ResetPath),
+    }) = &cli.command
+    {
+        // `--skills-root` points this run at an external checkout; recording
+        // that as the app library's move source would move the wrong thing.
+        if cli.skills_root.is_some() {
+            anyhow::bail!("repo set-path / reset-path cannot be combined with --skills-root");
+        }
+        let path = match command {
+            RepoCommand::SetPath { path } => Some(path.clone()),
+            _ => None,
+        };
+        central_repo::set_base_dir_override(path)?;
+        let store = app_state::initialize_cli_store_moving_repo()?;
+        print_json(&repo_status(&store), cli.json);
+        return Ok(());
+    }
+
     if let Some(skills_root) = &cli.skills_root {
         let base = central_repo::external_base_dir(skills_root);
         central_repo::set_runtime_base_dir_override(Some(base));
@@ -709,15 +745,8 @@ fn run(cli: Cli) -> anyhow::Result<()> {
 fn run_repo(args: RepoArgs, store: &SkillStore, json: bool) -> anyhow::Result<()> {
     match args.command {
         RepoCommand::Status => print_json(&repo_status(store), json),
-        RepoCommand::SetPath { path } => {
-            central_repo::set_base_dir_override(Some(path))?;
-            let store = app_state::initialize_cli_store()?;
-            print_json(&repo_status(&store), json);
-        }
-        RepoCommand::ResetPath => {
-            central_repo::set_base_dir_override(None)?;
-            let store = app_state::initialize_cli_store()?;
-            print_json(&repo_status(&store), json);
+        RepoCommand::SetPath { .. } | RepoCommand::ResetPath => {
+            unreachable!("handled in run() before the store is opened")
         }
     }
     Ok(())
@@ -732,6 +761,8 @@ fn repo_status(store: &SkillStore) -> RepoStatus {
         skill_count: store.get_all_skills().unwrap_or_default().len(),
         preset_count: store.get_all_scenarios().unwrap_or_default().len(),
         active_preset_id: store.get_active_scenario_id().unwrap_or(None),
+        pending_base_dir: central_repo::pending_base_dir()
+            .map(|path| path.to_string_lossy().to_string()),
     }
 }
 
@@ -745,6 +776,27 @@ fn run_tools(args: ToolsArgs, store: &SkillStore, json: bool) -> anyhow::Result<
         }
         ToolsCommand::Disable { agents } => {
             print_json(&run_set_agents_enabled(store, &agents, false)?, json)
+        }
+        ToolsCommand::AddCustom {
+            key,
+            path,
+            name,
+            project_path,
+        } => {
+            tool_cmd::add_custom_tool_internal(
+                store,
+                &key,
+                name.as_deref().unwrap_or(&key),
+                &path,
+                project_path.as_deref(),
+            )
+            .map_err(map_app_err)?;
+            store.log_audit(AuditDraft::new("add_custom_agent").tool(key.clone()).ok());
+            let info = tool_service::list_tool_info(store)
+                .into_iter()
+                .find(|info| info.key == key.trim())
+                .ok_or_else(|| anyhow!("agent {key} was not saved"))?;
+            print_json(&info, json)
         }
     }
     Ok(())
@@ -1196,7 +1248,10 @@ fn run_skill_deployment(
     let changed_pairs = changed.len();
 
     let mut preserved: Vec<String> = Vec::new();
-    if !dry_run {
+    if dry_run && deploy {
+        scenario_service::preflight_add_skills_to_tools(store, &skill_ids, &agent_keys)
+            .map_err(map_app_err)?;
+    } else if !dry_run {
         scenario_service::apply_skills_to_tools(
             store,
             &skill_ids,
@@ -1936,6 +1991,13 @@ fn run_sync(
     };
 
     if dry_run {
+        let desired = scenario_service::collect_scenario_sync_targets(store, &preset.id)
+            .map_err(map_app_err)?;
+        let desired: Vec<_> = desired
+            .into_iter()
+            .filter(|target| tool_key.is_none_or(|tool| target.tool == tool))
+            .collect();
+        scenario_service::preflight_scenario_sync_targets(store, &desired).map_err(map_app_err)?;
         return Ok(SyncReport {
             ok: true,
             preset_id: preset.id,
@@ -2782,7 +2844,10 @@ fn run_preset_deployment(
     let changed_pairs = changed.len();
 
     let mut preserved: Vec<String> = Vec::new();
-    if !dry_run {
+    if dry_run && deploy {
+        scenario_service::preflight_add_skills_to_tools(store, &skill_ids, &agent_keys)
+            .map_err(map_app_err)?;
+    } else if !dry_run {
         scenario_service::apply_skills_to_tools(
             store,
             &skill_ids,
@@ -3085,6 +3150,159 @@ mod tests {
     use app_lib::core::tool_adapters::{CustomToolDef, ToolCategory};
     use std::fs;
     use tempfile::tempdir;
+
+    #[test]
+    fn agents_add_custom_registers_the_agent_and_rejects_a_duplicate() {
+        let tmp = tempdir().unwrap();
+        let store = SkillStore::new(&tmp.path().join("skills.db")).unwrap();
+        let skills = tmp.path().join("hermes-work/skills");
+        let args = |key: &str| match Cli::try_parse_from([
+            "skills-manager-cli",
+            "agents",
+            "add-custom",
+            key,
+            "--path",
+            skills.to_str().unwrap(),
+            "--name",
+            "Hermes Work",
+            "--project-path",
+            ".hermes/skills",
+        ])
+        .unwrap()
+        .command
+        {
+            Commands::Tools(args) => args,
+            other => panic!("unexpected command {other:?}"),
+        };
+
+        run_tools(args("hermes-work"), &store, true).unwrap();
+        let custom = tool_service::get_custom_tools(&store);
+        assert_eq!(custom.len(), 1);
+        assert_eq!(custom[0].key, "hermes-work");
+        assert_eq!(custom[0].display_name, "Hermes Work");
+        assert_eq!(
+            custom[0].project_relative_skills_dir.as_deref(),
+            Some(".hermes/skills")
+        );
+
+        assert!(run_tools(args("hermes-work"), &store, true).is_err());
+        assert_eq!(tool_service::get_custom_tools(&store).len(), 1);
+    }
+
+    #[test]
+    fn deployment_dry_runs_refuse_a_foreign_target_without_changes() {
+        let tmp = tempdir().unwrap();
+        let store = SkillStore::new(&tmp.path().join("skills.db")).unwrap();
+        let source = tmp.path().join("central/demo");
+        let target_root = tmp.path().join("agent-skills");
+        fs::create_dir_all(&source).unwrap();
+        fs::create_dir_all(&target_root).unwrap();
+        fs::write(source.join("SKILL.md"), "# Demo\n").unwrap();
+        tool_service::set_custom_tools(
+            &store,
+            &[CustomToolDef {
+                key: "test_agent".to_string(),
+                display_name: "Test Agent".to_string(),
+                skills_dir: target_root.to_string_lossy().to_string(),
+                project_relative_skills_dir: None,
+                category: ToolCategory::Coding,
+            }],
+        )
+        .unwrap();
+        store
+            .insert_skill(&SkillRecord {
+                id: "skill-demo".to_string(),
+                name: "demo".to_string(),
+                description: None,
+                source_type: "local".to_string(),
+                source_ref: Some(source.to_string_lossy().to_string()),
+                source_ref_resolved: None,
+                source_subpath: None,
+                source_branch: None,
+                source_revision: None,
+                remote_revision: None,
+                central_path: source.to_string_lossy().to_string(),
+                content_hash: None,
+                enabled: true,
+                created_at: 1,
+                updated_at: 1,
+                status: "ok".to_string(),
+                update_status: "local_only".to_string(),
+                last_checked_at: None,
+                last_check_error: None,
+            })
+            .unwrap();
+        store
+            .insert_scenario(&ScenarioRecord {
+                id: "preset-demo".to_string(),
+                name: "Demo".to_string(),
+                description: None,
+                icon: None,
+                sort_order: 0,
+                created_at: 1,
+                updated_at: 1,
+            })
+            .unwrap();
+        store
+            .add_skill_to_scenario("preset-demo", "skill-demo")
+            .unwrap();
+
+        let target = target_root.join("demo");
+        let foreign = tmp.path().join("foreign");
+        fs::create_dir_all(&foreign).unwrap();
+        fs::write(foreign.join("mine.txt"), "keep").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&foreign, &target).unwrap();
+        #[cfg(not(unix))]
+        {
+            fs::create_dir_all(&target).unwrap();
+            fs::write(target.join("mine.txt"), "keep").unwrap();
+        }
+
+        let skill_err = run_skill_deployment(
+            &store,
+            &["demo".to_string()],
+            &["test_agent".to_string()],
+            true,
+            true,
+        )
+        .unwrap_err();
+        let preset_err =
+            run_preset_deployment(&store, "Demo", &["test_agent".to_string()], true, true)
+                .unwrap_err();
+        let sync_err = run_sync(&store, Some("Demo"), Some("test_agent"), true).unwrap_err();
+        assert_eq!(store.get_active_scenario_id().unwrap(), None);
+        assert!(store.get_all_targets().unwrap().is_empty());
+        let real_skill_err = run_skill_deployment(
+            &store,
+            &["demo".to_string()],
+            &["test_agent".to_string()],
+            true,
+            false,
+        )
+        .unwrap_err();
+        let real_preset_err =
+            run_preset_deployment(&store, "Demo", &["test_agent".to_string()], true, false)
+                .unwrap_err();
+        let real_sync_err = run_sync(&store, Some("Demo"), Some("test_agent"), false).unwrap_err();
+        for error in [
+            skill_err,
+            preset_err,
+            sync_err,
+            real_skill_err,
+            real_preset_err,
+            real_sync_err,
+        ] {
+            let envelope = error_envelope(&error);
+            assert_eq!(envelope["code"], "TARGET_CONFLICT");
+            assert_eq!(
+                envelope["details"]["conflicts"][0]["path"],
+                target.to_string_lossy().as_ref()
+            );
+        }
+        assert_eq!(fs::read_to_string(target.join("mine.txt")).unwrap(), "keep");
+        assert!(store.get_all_targets().unwrap().is_empty());
+    }
 
     #[test]
     fn parses_agent_friendly_commands_and_aliases() {

@@ -733,6 +733,9 @@ export const getCentralRepoPath = () =>
 export const getCentralRepoPathOverride = () =>
   invoke<string | null>("get_central_repo_path_override");
 
+export const getCentralRepoPendingPath = () =>
+  invoke<string | null>("get_central_repo_pending_path");
+
 export const getCentralRepoWarnings = () =>
   invoke<string[]>("get_central_repo_warnings");
 

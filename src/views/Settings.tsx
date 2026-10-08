@@ -53,7 +53,7 @@ import { writeText as clipboardWriteText } from "@tauri-apps/plugin-clipboard-ma
 import { check as checkUpdater } from "@tauri-apps/plugin-updater";
 import { open as dialogOpen, confirm as dialogConfirm } from "@tauri-apps/plugin-dialog";
 import { useNavigate } from "react-router-dom";
-import { cn } from "../utils";
+import { cn, compactHomePath } from "../utils";
 import { useApp } from "../context/AppContext";
 import { useThemeContext } from "../context/ThemeContext";
 import { AgentIcon } from "../components/AgentIcon";
@@ -85,13 +85,6 @@ type SettingsSectionId = (typeof SETTINGS_SECTION_IDS)[number];
 const CAN_INSTALL_IN_APP = IS_WINDOWS || IS_MACOS;
 
 const RESTART_TOAST_ID = "app-update-restart";
-
-function compactHomePath(path: string) {
-  return path
-    .replace(/\/Users\/[^/]+/, "~")
-    .replace(/\/home\/[^/]+/, "~")
-    .replace(/^[A-Za-z]:\\Users\\[^\\]+/, "~");
-}
 
 interface SortableAgentCardProps {
   agentKey: string;
@@ -184,6 +177,7 @@ export function Settings() {
   const [repoWarnings, setRepoWarnings] = useState<string[]>([]);
   const [centralRepoPath, setCentralRepoPath] = useState("");
   const [centralRepoPathOverride, setCentralRepoPathOverride] = useState<string | null>(null);
+  const [centralRepoPendingPath, setCentralRepoPendingPath] = useState<string | null>(null);
   const [editingCentralRepoPath, setEditingCentralRepoPath] = useState(false);
   const [centralRepoPathInput, setCentralRepoPathInput] = useState("");
   const [savingCentralRepoPath, setSavingCentralRepoPath] = useState(false);
@@ -401,6 +395,7 @@ export function Settings() {
       setCentralRepoPathInput(path);
     }).catch(() => {});
     api.getCentralRepoPathOverride().then(setCentralRepoPathOverride).catch(() => {});
+    api.getCentralRepoPendingPath().then(setCentralRepoPendingPath).catch(() => {});
 
     // The saved setting is the single source of truth. Do not backfill from
     // `.git/config` — that made a cleared URL reappear on reopen (#260).
@@ -535,12 +530,15 @@ export function Settings() {
     }
     setSavingCentralRepoPath(true);
     try {
+      // The running session keeps using the current library; the move
+      // happens at the next launch.
       const nextPath = await api.setCentralRepoPath(trimmed);
-      setCentralRepoPath(nextPath);
       setCentralRepoPathOverride(nextPath);
+      const pending = await api.getCentralRepoPendingPath();
+      setCentralRepoPendingPath(pending);
       setEditingCentralRepoPath(false);
       toast.success(t("settings.repoPathSaved"));
-      toast.info(t("settings.repoPathRestartNotice"));
+      if (pending) toast.info(t("settings.repoPathRestartNotice"));
     } catch (error) {
       toast.error(String(error));
     } finally {
@@ -552,12 +550,13 @@ export function Settings() {
     setSavingCentralRepoPath(true);
     try {
       const nextPath = await api.setCentralRepoPath(null);
-      setCentralRepoPath(nextPath);
       setCentralRepoPathOverride(null);
       setCentralRepoPathInput(nextPath);
+      const pending = await api.getCentralRepoPendingPath();
+      setCentralRepoPendingPath(pending);
       setEditingCentralRepoPath(false);
       toast.success(t("settings.repoPathReset"));
-      toast.info(t("settings.repoPathRestartNotice"));
+      if (pending) toast.info(t("settings.repoPathRestartNotice"));
     } catch (error) {
       toast.error(String(error));
     } finally {
@@ -1417,9 +1416,17 @@ export function Settings() {
                 </button>
               </div>
               <div className="w-full text-[12px] text-muted">
-                {centralRepoPathOverride
-                  ? t("settings.repoPathCustomHint")
-                  : t("settings.repoPathDefaultHint")}
+                {centralRepoPendingPath ? (
+                  <span className="text-amber-600 dark:text-amber-400">
+                    {t("settings.repoPathPendingHint", {
+                      path: compactHomePath(centralRepoPendingPath),
+                    })}
+                  </span>
+                ) : centralRepoPathOverride ? (
+                  t("settings.repoPathCustomHint")
+                ) : (
+                  t("settings.repoPathDefaultHint")
+                )}
               </div>
             </div>
 

@@ -214,6 +214,11 @@ pub(crate) fn run_round_blocking(store: &SkillStore) -> Outcome {
     let Ok(_lock) = RepoLock::acquire("auto backup") else {
         return Outcome::Skipped("repo busy");
     };
+    // Before the check below, which reports any error as a quiet skip: an
+    // unreadable repo format must reach the backup card, not stall silently.
+    if let Err(e) = git_backup::ensure_files_ref_format(&skills_dir) {
+        return Outcome::Failed(format!("{e:#}"));
+    }
     if git_backup::ensure_no_interrupted_git_operation(&skills_dir).is_err() {
         return Outcome::Skipped("interrupted git operation");
     }
@@ -470,6 +475,25 @@ mod tests {
 
         // A second round with nothing new is a no-op.
         assert_eq!(run_round_blocking(&env.store), Outcome::UpToDate);
+    }
+
+    #[test]
+    fn a_reftable_repo_fails_the_round_visibly_instead_of_skipping() {
+        let env = test_env();
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&env.skills_dir)
+            .args(["refs", "migrate", "--ref-format=reftable"])
+            .output()
+            .unwrap();
+        if !out.status.success() {
+            eprintln!("skipping: this git cannot migrate to reftable");
+            return;
+        }
+        match run_round_blocking(&env.store) {
+            Outcome::Failed(msg) => assert!(msg.contains("reftable"), "{msg}"),
+            other => panic!("expected a visible failure, got {other:?}"),
+        }
     }
 
     /// Clone the test remote as a second "device" with its own identity.

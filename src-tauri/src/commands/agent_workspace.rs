@@ -310,7 +310,7 @@ fn import_agent_local_skill_to_center(
             store,
             &existing.id,
             agent,
-            scenario_service::DeployIntent::AdoptExisting,
+            scenario_service::DeployIntent::AdoptExisting(&source_path),
         )?;
         return Ok(());
     }
@@ -352,7 +352,7 @@ fn import_agent_local_skill_to_center(
         store,
         &skill_record.id,
         agent,
-        scenario_service::DeployIntent::AdoptExisting,
+        scenario_service::DeployIntent::AdoptExisting(&source_path),
     ) {
         let _ = store.delete_skill(&skill_record.id);
         return Err(err);
@@ -572,7 +572,7 @@ pub fn backfill_stranded_agent_targets(store: &SkillStore) -> usize {
                 store,
                 &matched.id,
                 &adapter.key,
-                scenario_service::DeployIntent::AdoptExisting,
+                scenario_service::DeployIntent::AdoptExisting(local_path),
             ) {
                 Ok(()) => {
                     repaired += 1;
@@ -721,8 +721,97 @@ mod tests {
     use crate::core::content_hash;
     use crate::core::project_scanner::ProjectSkillInfo;
     use crate::core::skill_store::{ScenarioRecord, SkillRecord, SkillStore};
-    use crate::core::{central_repo, installer, sync_engine, tool_adapters, tool_service};
+    use crate::core::{
+        central_repo, installer, scenario_service, sync_engine, tool_adapters, tool_service,
+    };
     use std::collections::HashMap;
+
+    #[test]
+    fn importing_nested_hermes_skill_preserves_same_named_category() {
+        let _guard = central_repo::test_base_dir_lock();
+        let temp = tempfile::tempdir().unwrap();
+        central_repo::set_test_base_dir_override(Some(temp.path().join("center")));
+        let store = SkillStore::new(&temp.path().join("store.db")).unwrap();
+
+        let skills_root = temp.path().join("hermes-skills");
+        let nested_skill = skills_root.join("software-development").join("github");
+        let other_skill = skills_root.join("github").join("github-auth");
+        std::fs::create_dir_all(&nested_skill).unwrap();
+        std::fs::create_dir_all(&other_skill).unwrap();
+        std::fs::write(nested_skill.join("SKILL.md"), "# github\n").unwrap();
+        std::fs::write(other_skill.join("SKILL.md"), "# github-auth\n").unwrap();
+        std::fs::write(other_skill.join("mine.txt"), "keep this category").unwrap();
+        store
+            .set_setting(
+                "custom_tool_paths",
+                &serde_json::json!({ "hermes": skills_root.to_string_lossy() }).to_string(),
+            )
+            .unwrap();
+
+        import_agent_local_skill_to_center(&store, "hermes", "software-development/github")
+            .unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(other_skill.join("mine.txt")).unwrap(),
+            "keep this category"
+        );
+        let targets = store.get_all_targets().unwrap();
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].target_path, nested_skill.to_string_lossy());
+        assert!(nested_skill.join("SKILL.md").exists());
+
+        let skill_id = targets[0].skill_id.clone();
+        scenario_service::sync_single_skill_to_tool(
+            &store,
+            &skill_id,
+            "hermes",
+            scenario_service::DeployIntent::Managed,
+        )
+        .unwrap();
+        scenario_service::apply_skills_to_tools(
+            &store,
+            &[skill_id.clone()],
+            &["hermes".to_string()],
+            scenario_service::BatchApplyMode::Add,
+        )
+        .unwrap();
+        let now = chrono::Utc::now().timestamp_millis();
+        store
+            .insert_scenario(&ScenarioRecord {
+                id: "active".to_string(),
+                name: "Active".to_string(),
+                description: None,
+                icon: None,
+                sort_order: 0,
+                created_at: now,
+                updated_at: now,
+            })
+            .unwrap();
+        store.add_skill_to_scenario("active", &skill_id).unwrap();
+        for adapter in tool_adapters::enabled_installed_adapters(&store) {
+            if adapter.key != "hermes" {
+                store
+                    .set_scenario_skill_tool_enabled("active", &skill_id, &adapter.key, false)
+                    .unwrap();
+            }
+        }
+        store.set_active_scenario("active").unwrap();
+        let desired = scenario_service::collect_scenario_sync_targets(&store, "active").unwrap();
+        assert_eq!(desired.len(), 1);
+        assert_eq!(desired[0].target, nested_skill);
+        scenario_service::sync_skill_to_active_scenario(&store, "active", &skill_id).unwrap();
+        assert!(!skills_root.join("github").join("SKILL.md").exists());
+        assert_eq!(
+            std::fs::read_to_string(other_skill.join("mine.txt")).unwrap(),
+            "keep this category"
+        );
+        assert_eq!(
+            store.get_all_targets().unwrap()[0].target_path,
+            nested_skill.to_string_lossy()
+        );
+
+        central_repo::set_test_base_dir_override(None);
+    }
 
     #[test]
     fn importing_agent_local_skill_attaches_target_but_not_scenario() {

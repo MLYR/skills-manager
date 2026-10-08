@@ -1,4 +1,5 @@
-import { Loader2 } from "lucide-react";
+import { useState } from "react";
+import { ChevronUp, Loader2 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import type { ProjectAgentTarget } from "../lib/tauri";
 import { cn } from "../utils";
@@ -43,6 +44,7 @@ export function ProjectAgentDots({
   pendingKey,
 }: Props) {
   const { t } = useTranslation();
+  const [expanded, setExpanded] = useState(false);
   const assignedSet = new Set(assignedAgents);
   const availableKeys = new Set(targets.filter((t) => t.installed && t.enabled).map((t) => t.key));
 
@@ -67,8 +69,9 @@ export function ProjectAgentDots({
     });
   }
 
-  const visible = typeof limit === "number" ? dots.slice(0, limit) : dots;
-  const hiddenCount = dots.length - visible.length;
+  const collapsedDots = typeof limit === "number" ? dots.slice(0, limit) : dots;
+  const hiddenCount = dots.length - collapsedDots.length;
+  const visible = onToggle && expanded ? dots : collapsedDots;
 
   const dim = size === "sm"
     ? "h-[16px] w-[16px] text-[8px]"
@@ -99,14 +102,14 @@ export function ProjectAgentDots({
   };
 
   return (
-    <div className={cn("flex items-center gap-[2px]", className)}>
+    <div className={cn("flex items-center gap-[2px]", onToggle && expanded && "max-w-[160px] flex-wrap", className)}>
       {visible.map((dot) => {
         const useIcon = hasAgentIcon(dot.key);
         const isPending = pendingKey === dot.key;
         const interactive = !!onToggle && !isPending;
         const title = `${dot.displayName}${stateTitle[dot.state]}${onToggle ? clickHint[dot.state] : ""}`;
         const baseClass = cn(
-          "inline-flex select-none items-center justify-center overflow-hidden rounded-[4px] transition-colors",
+          "inline-flex shrink-0 select-none items-center justify-center overflow-hidden rounded-[4px] transition-colors",
           dim,
           useIcon ? iconStateClass[dot.state] : cn("border font-mono font-semibold tracking-tight", textStateClass[dot.state]),
           interactive && "cursor-pointer hover:ring-1 hover:ring-accent/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent",
@@ -149,17 +152,35 @@ export function ProjectAgentDots({
           </span>
         );
       })}
-      {hiddenCount > 0 && (
+      {hiddenCount > 0 && (onToggle ? (
+        <button
+          type="button"
+          title={t(expanded ? "common.collapse" : "common.expandAll")}
+          aria-label={t(expanded ? "common.collapse" : "common.expandAll")}
+          aria-expanded={expanded}
+          onClick={(e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            setExpanded((value) => !value);
+          }}
+          className={cn(
+            "inline-flex shrink-0 select-none items-center justify-center rounded-[4px] border border-border-subtle bg-surface-hover font-mono font-semibold text-faint hover:ring-1 hover:ring-accent/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent",
+            dim,
+          )}
+        >
+          {expanded ? <ChevronUp className="h-3 w-3" /> : `+${hiddenCount}`}
+        </button>
+      ) : (
         <span
           title={`+${hiddenCount} more agents`}
           className={cn(
-            "inline-flex select-none items-center justify-center rounded-[4px] border border-border-subtle bg-surface-hover font-mono font-semibold text-faint",
+            "inline-flex shrink-0 select-none items-center justify-center rounded-[4px] border border-border-subtle bg-surface-hover font-mono font-semibold text-faint",
             dim,
           )}
         >
           +{hiddenCount}
         </span>
-      )}
+      ))}
     </div>
   );
 }

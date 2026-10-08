@@ -153,27 +153,24 @@ function createHunk(rows: DiffRow[], start: number, end: number, index: number):
 function cellTone(type: DiffRow["type"], side: "left" | "right") {
   if (type === "removed" && side === "left") {
     return {
-      lineNoClass: "text-red-900 dark:text-red-200",
-      lineNoStyle: { backgroundColor: "#ffd7d5" },
-      codeClass: "text-red-950 dark:text-red-50",
-      codeStyle: { backgroundColor: "#ffebe9", boxShadow: "inset 3px 0 0 #cf222e" },
+      lineNoClass: "bg-[#ffd7d5] text-red-900 dark:bg-[#3c1618] dark:text-red-200",
+      codeClass: "bg-[#ffebe9] text-red-950 dark:bg-[#2d1013] dark:text-red-50",
+      codeStyle: { boxShadow: "inset 3px 0 0 #cf222e" },
       markerClass: "text-red-700 dark:text-red-300",
     };
   }
   if (type === "added" && side === "right") {
     return {
-      lineNoClass: "text-emerald-900 dark:text-emerald-200",
-      lineNoStyle: { backgroundColor: "#aceebb" },
-      codeClass: "text-emerald-950 dark:text-emerald-50",
-      codeStyle: { backgroundColor: "#dafbe1", boxShadow: "inset 3px 0 0 #1a7f37" },
+      lineNoClass: "bg-[#aceebb] text-emerald-900 dark:bg-[#1b4721] dark:text-emerald-200",
+      codeClass: "bg-[#dafbe1] text-emerald-950 dark:bg-[#12261e] dark:text-emerald-50",
+      codeStyle: { boxShadow: "inset 3px 0 0 #1a7f37" },
       markerClass: "text-emerald-700 dark:text-emerald-300",
     };
   }
   return {
-    lineNoClass: "text-faint",
-    lineNoStyle: { backgroundColor: "var(--color-surface-hover)" },
-    codeClass: "text-secondary",
-    codeStyle: { backgroundColor: "var(--color-bg-secondary)" },
+    lineNoClass: "bg-surface-hover text-faint",
+    codeClass: "bg-bg-secondary text-secondary",
+    codeStyle: undefined,
     markerClass: "text-faint",
   };
 }
@@ -196,7 +193,6 @@ function DiffCell({
     <>
       <td
         className={cn("w-14 select-none border-r border-border-subtle px-3 text-right font-mono text-[12px]", tone.lineNoClass)}
-        style={tone.lineNoStyle}
       >
         {number ?? ""}
       </td>
@@ -229,11 +225,11 @@ export function DocumentDiffViewer({ original, updated, className }: DocumentDif
     <div className={cn("space-y-4", className)}>
       {hunks.map((hunk) => (
         <div key={hunk.id} className="overflow-hidden rounded-xl border border-border-subtle bg-bg-secondary">
-          <div className="grid grid-cols-2 border-b border-border-subtle" style={{ backgroundColor: "#ddf4ff" }}>
-            <div className="border-r border-border-subtle px-3 py-2 font-mono text-[11px] text-sky-800">
+          <div className="grid grid-cols-2 border-b border-border-subtle bg-[#ddf4ff] dark:bg-[#0c2d40]">
+            <div className="border-r border-border-subtle px-3 py-2 font-mono text-[11px] text-sky-800 dark:text-sky-300">
               @@ -{hunk.leftStart},{hunk.leftCount}
             </div>
-            <div className="px-3 py-2 font-mono text-[11px] text-sky-800">
+            <div className="px-3 py-2 font-mono text-[11px] text-sky-800 dark:text-sky-300">
               @@ +{hunk.rightStart},{hunk.rightCount}
             </div>
           </div>

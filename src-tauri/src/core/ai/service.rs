@@ -1061,6 +1061,9 @@ mod tests {
 
     #[tokio::test]
     async fn content_change_after_preview_fails_without_network() {
+        // skills_dir 覆盖是进程级静态状态：本测试改了它就必须与其它读取它的测试串行，
+        // 否则并发的 app_state 元数据重建测试会读到本测试的临时目录并报 ENOENT。
+        let _central_override_guard = crate::core::central_repo::test_base_dir_lock();
         let _guard = CENTRAL_ROOT_LOCK.lock().unwrap();
         let directory = tempdir().unwrap();
         let store = Arc::new(SkillStore::new(&directory.path().join("service.db")).unwrap());
@@ -1164,6 +1167,9 @@ mod tests {
 
     #[tokio::test]
     async fn full_analysis_closed_loop_accepts_openai_chat_envelope() {
+        // skills_dir 覆盖是进程级静态状态：本测试改了它就必须与其它读取它的测试串行，
+        // 否则并发的 app_state 元数据重建测试会读到本测试的临时目录并报 ENOENT。
+        let _central_override_guard = crate::core::central_repo::test_base_dir_lock();
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         use tokio::net::TcpListener;
 

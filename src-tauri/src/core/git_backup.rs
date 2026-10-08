@@ -281,7 +281,16 @@ pub(crate) fn init_repo_unlocked(skills_dir: &Path, device_name: &str) -> Result
         anyhow::bail!("Already a git repository");
     }
 
-    run_git_checked(skills_dir, &["init"])?;
+    // Pin the classic ref format: libgit2 cannot open reftable repositories,
+    // and the user's git may default to it via config or the environment.
+    let output = git_command()
+        .args(["-c", "init.defaultRefFormat=files", "init"])
+        .env_remove("GIT_DEFAULT_REF_FORMAT")
+        .current_dir(skills_dir)
+        .output()?;
+    if !output.status.success() {
+        anyhow::bail!("git init failed: {}", String::from_utf8_lossy(&output.stderr).trim());
+    }
     run_git_checked(skills_dir, &["checkout", "-b", "main"])?;
 
     // Identity must exist before the initial commit: on machines without a
@@ -1061,7 +1070,8 @@ pub(crate) fn clone_into_unlocked(skills_dir: &Path, url: &str) -> Result<()> {
     } else {
         let env = git_credentials::credential_env_for_url(url);
         let output = git_command()
-            .arg("clone")
+            .args(["-c", "init.defaultRefFormat=files", "clone"])
+            .env_remove("GIT_DEFAULT_REF_FORMAT")
             .arg(url)
             .arg(skills_dir)
             .envs(env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
@@ -1367,6 +1377,20 @@ fn ensure_repo(skills_dir: &Path) -> Result<()> {
     if !skills_dir.join(".git").exists() {
         anyhow::bail!("Skills directory is not a git repository. Initialize it first.");
     }
+    ensure_files_ref_format(skills_dir)
+}
+
+/// libgit2 (merge, git2 engine) cannot open a reftable repository; it would
+/// fail later with an opaque "invalid ref" error. Created when the user's git
+/// defaults to reftable. Migrating rewrites the user's refs, so we only explain.
+pub(crate) fn ensure_files_ref_format(skills_dir: &Path) -> Result<()> {
+    if skills_dir.join(".git").join("reftable").is_dir() {
+        anyhow::bail!(
+            "The skills library's git repository uses the reftable format, which Skills Manager cannot read. \
+             Close other git tools, run `git -C \"{}\" refs migrate --ref-format=files` (Git 2.48+), then try again.",
+            skills_dir.display()
+        );
+    }
     Ok(())
 }
 
@@ -1398,6 +1422,7 @@ fn remove_tmp_metadata_files(skills_dir: &Path) {
 }
 
 pub(crate) fn ensure_no_interrupted_git_operation(skills_dir: &Path) -> Result<()> {
+    ensure_files_ref_format(skills_dir)?;
     let git_dir = skills_dir.join(".git");
     for marker in ["MERGE_HEAD", "index.lock", "rebase-merge", "rebase-apply"] {
         if git_dir.join(marker).exists() {
@@ -2152,6 +2177,35 @@ mod tests {
     }
 
     // ── restore safety point ──
+
+    #[test]
+    fn a_reftable_library_is_refused_with_a_migration_hint() {
+        let tmp = tempfile::tempdir().unwrap();
+        let out = Command::new("git")
+            .args(["init", "--ref-format=reftable"])
+            .arg(tmp.path())
+            .output()
+            .unwrap();
+        if !out.status.success() {
+            eprintln!("skipping: this git cannot create reftable repositories");
+            return;
+        }
+        let err = ensure_repo(tmp.path()).unwrap_err().to_string();
+        assert!(err.contains("refs migrate --ref-format=files"), "{err}");
+        assert!(ensure_no_interrupted_git_operation(tmp.path()).is_err());
+    }
+
+    #[test]
+    #[ignore = "mutates GIT_DEFAULT_REF_FORMAT; run alone"]
+    fn init_creates_a_files_repo_even_when_git_defaults_to_reftable() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::env::set_var("GIT_DEFAULT_REF_FORMAT", "reftable");
+        let result = init_repo_unlocked(tmp.path(), "test-device");
+        std::env::remove_var("GIT_DEFAULT_REF_FORMAT");
+        result.unwrap();
+        assert!(!tmp.path().join(".git/reftable").exists());
+        ensure_repo(tmp.path()).unwrap();
+    }
 
     #[test]
     fn restore_creates_safety_point_capturing_dirty_tree() {

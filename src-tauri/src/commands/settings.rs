@@ -95,6 +95,12 @@ pub fn get_central_repo_path_override() -> Option<String> {
     central_repo::configured_base_dir().map(|path| path.to_string_lossy().to_string())
 }
 
+/// Where a saved path change will move the library at the next launch.
+#[tauri::command]
+pub fn get_central_repo_pending_path() -> Option<String> {
+    central_repo::pending_base_dir().map(|path| path.to_string_lossy().to_string())
+}
+
 /// Warning codes recorded while resolving the central repository at startup
 /// (e.g. unreadable config, invalid configured path). Non-empty means the app
 /// fell back to the default location and the user should be told (#228).

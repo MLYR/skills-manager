@@ -47,6 +47,11 @@ pub fn bridge_dir() -> PathBuf {
     central_repo::home_base_dir().join("bin")
 }
 
+/// Whether `name` is one of the files the bridge keeps in [`bridge_dir`].
+pub(crate) fn is_bridge_file(name: &str) -> bool {
+    name == BRIDGE_BIN_NAME || name == ".version" || name == format!(".{BRIDGE_BIN_NAME}.staged")
+}
+
 pub fn bridge_path() -> PathBuf {
     bridge_dir().join(BRIDGE_BIN_NAME)
 }
@@ -215,12 +220,8 @@ fn publish_from(source: &Path, app_version: &str) -> Result<PathBuf> {
     // On Windows this fails while the old binary is running or held open by a
     // scanner. That is the case the stamp exists for: the stale binary stays,
     // unusable, rather than being silently presented as current.
-    std::fs::rename(&staged, &target).with_context(|| {
-        format!(
-            "could not replace {} (it may be in use)",
-            target.display()
-        )
-    })?;
+    rename_retrying_sharing_violation(&staged, &target)
+        .with_context(|| format!("could not replace {} (it may be in use)", target.display()))?;
 
     std::fs::write(stamp_path(), app_version)
         .with_context(|| format!("could not write {}", stamp_path().display()))?;
@@ -230,6 +231,28 @@ fn publish_from(source: &Path, app_version: &str) -> Result<PathBuf> {
         target.display()
     );
     Ok(target)
+}
+
+/// #487: right after `verify` ran the staged exe, Windows can still hold it
+/// for a moment (scanners inspect a freshly executed binary), so the rename
+/// fails with a sharing violation. Wait that out, ~2 s at most; any other
+/// error, or a lock that outlasts it, is reported as before.
+fn rename_retrying_sharing_violation(from: &Path, to: &Path) -> std::io::Result<()> {
+    const ERROR_SHARING_VIOLATION: i32 = 32;
+    let mut attempts = 0;
+    loop {
+        match std::fs::rename(from, to) {
+            Err(e)
+                if cfg!(windows)
+                    && e.raw_os_error() == Some(ERROR_SHARING_VIOLATION)
+                    && attempts < 10 =>
+            {
+                attempts += 1;
+                std::thread::sleep(std::time::Duration::from_millis(200));
+            }
+            result => return result,
+        }
+    }
 }
 
 #[cfg(test)]

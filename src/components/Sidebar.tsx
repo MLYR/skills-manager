@@ -49,10 +49,10 @@ export function Sidebar() {
   const { t } = useTranslation();
   const location = useLocation();
   const navigate = useNavigate();
-  const { presets, viewedPreset, setViewedPresetId, refreshPresets, refreshManagedSkills, projects, refreshProjects, tools, managedSkills, appUpdate } = useApp();
+  const { presets, viewedPreset, setViewedPresetId, closeSkillDetail, refreshPresets, refreshManagedSkills, projects, refreshProjects, tools, managedSkills, appUpdate } = useApp();
   const [showCreate, setShowCreate] = useState(false);
   const [showAddProject, setShowAddProject] = useState(false);
-  const [renameTarget, setRenameTarget] = useState<{ id: string; name: string; icon?: string | null } | null>(null);
+  const [renameTarget, setRenameTarget] = useState<{ id: string; name: string; icon?: string | null; description?: string | null } | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<{ id: string; name: string } | null>(null);
   const [deleteProjectTarget, setDeleteProjectTarget] = useState<{ id: string; name: string } | null>(null);
   const installedTools = useMemo(() => tools.filter((t) => t.installed && t.enabled), [tools]);
@@ -174,6 +174,7 @@ export function Sidebar() {
   ];
 
   const handleSwitchPreset = (id: string) => {
+    closeSkillDetail();
     setViewedPresetId(id);
     if (location.pathname !== "/my-skills") {
       navigate("/my-skills");
@@ -189,18 +190,18 @@ export function Sidebar() {
     toast.success(t("preset.created"));
   };
 
-  const handleRenamePreset = async (newName: string, icon?: string) => {
+  const handleRenamePreset = async (newName: string, icon?: string, description?: string) => {
     if (!renameTarget) return;
     const preset = presets.find((s) => s.id === renameTarget.id);
     if (!preset) return;
     await api.updatePreset(
       renameTarget.id,
       newName,
-      preset.description || undefined,
+      description,
       icon || preset.icon || undefined
     );
     await refreshPresets();
-    toast.success(t("preset.renamed"));
+    toast.success(t("preset.updated"));
   };
 
   const handleDeletePreset = async () => {
@@ -215,7 +216,7 @@ export function Sidebar() {
 
   const handleRenameClick = (
     event: React.MouseEvent,
-    preset: { id: string; name: string; icon?: string | null }
+    preset: { id: string; name: string; icon?: string | null; description?: string | null }
   ) => {
     event.preventDefault();
     event.stopPropagation();
@@ -463,6 +464,7 @@ export function Sidebar() {
                               >
                                 <button
                                   onClick={() => handleSwitchPreset(preset.id)}
+                                  title={preset.description || undefined}
                                   className={cn(
                                     "flex min-w-0 flex-1 items-center gap-2 px-2.5 py-[7px] text-left text-sm leading-5 outline-none",
                                     isActive ? "font-medium text-primary" : "text-tertiary group-hover:text-secondary"
@@ -507,7 +509,7 @@ export function Sidebar() {
                                   <button
                                     onClick={(event) => handleRenameClick(event, preset)}
                                     className="rounded p-1 text-faint transition hover:text-secondary"
-                                    title={t("common.rename")}
+                                    title={t("common.edit")}
                                   >
                                     <Pencil className="h-3 w-3" />
                                   </button>
@@ -745,6 +747,7 @@ export function Sidebar() {
         open={renameTarget !== null}
         currentName={renameTarget?.name || ""}
         currentIcon={renameTarget?.icon}
+        currentDescription={renameTarget?.description}
         onClose={() => setRenameTarget(null)}
         onRename={handleRenamePreset}
       />

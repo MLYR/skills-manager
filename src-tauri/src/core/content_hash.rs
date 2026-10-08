@@ -15,6 +15,15 @@ fn is_ignored(name: &str) -> bool {
     IGNORED.contains(&name) || name.ends_with(".pyc")
 }
 
+/// Dependency installs (`npm install`, a Python venv) inside a skill. They stay
+/// in the content hash — a directory that holds them is not interchangeable
+/// with one that doesn't, and repairs that replace a directory on hash
+/// equality must keep seeing the difference. Only the update-check tiebreaker
+/// ([`hash_directory_eol_insensitive`]) looks past them (#502). The cost is
+/// that an edit to a file a skill keeps under a directory with one of these
+/// names goes unnoticed by that tiebreaker — nobody authors skill files there.
+const DEPENDENCY_DIRS: &[&str] = &["node_modules", ".venv", "venv"];
+
 /// One file in a skill's canonical "content scope" — the set of files that
 /// both [`hash_directory`] and the source-diff command operate on. Sharing
 /// this enumeration keeps the update badge and the diff from ever
@@ -59,20 +68,24 @@ fn exec_bits_of(_path: &Path) -> Option<u32> {
 /// [`list_content_files_strict`] instead.
 pub fn list_content_files(dir: &Path) -> Vec<ContentEntry> {
     // The lossy walk cannot fail: every error is skipped below.
-    walk_content_files(dir, false).unwrap_or_default()
+    walk_content_files(dir, false, false).unwrap_or_default()
 }
 
 /// [`list_content_files`] over the same content scope, but a directory that
 /// cannot be traversed is an error rather than an empty one.
 pub fn list_content_files_strict(dir: &Path) -> Result<Vec<ContentEntry>> {
-    walk_content_files(dir, true)
+    walk_content_files(dir, true, false)
 }
 
-fn walk_content_files(dir: &Path, strict: bool) -> Result<Vec<ContentEntry>> {
+fn walk_content_files(dir: &Path, strict: bool, skip_deps: bool) -> Result<Vec<ContentEntry>> {
     let mut entries = Vec::new();
     for result in WalkDir::new(dir).into_iter().filter_entry(|e| {
         let name = e.file_name().to_string_lossy();
         !is_ignored(&name)
+            && !(skip_deps
+                && e.depth() > 0
+                && e.file_type().is_dir()
+                && DEPENDENCY_DIRS.contains(&name.as_ref()))
     }) {
         match result {
             Ok(entry) if entry.file_type().is_file() => entries.push(entry),
@@ -261,8 +274,11 @@ pub fn hash_entries_eol_insensitive(entries: &[ContentEntry]) -> Result<String> 
 ///   match on what remains;
 /// - an empty or missing directory is an error, not "the hash of nothing",
 ///   which every empty tree would share.
+///
+/// Dependency installs ([`DEPENDENCY_DIRS`]) are skipped as well: `npm install`
+/// in a local skill's source is not an update to offer (#502).
 pub fn hash_directory_eol_insensitive(dir: &Path) -> Result<String> {
-    let entries = list_content_files_strict(dir)?;
+    let entries = walk_content_files(dir, true, true)?;
     if entries.is_empty() {
         anyhow::bail!("no content files under {}", dir.display());
     }
@@ -274,6 +290,41 @@ mod tests {
     use super::*;
     use std::fs;
     use tempfile::tempdir;
+
+    /// #502: the update tiebreaker looks past dependency installs, while the
+    /// stored-identity hash keeps seeing them.
+    #[test]
+    fn dependency_installs_only_bypass_the_update_tiebreaker() {
+        let tmp = tempdir().unwrap();
+        fs::write(tmp.path().join("SKILL.md"), "# hello").unwrap();
+        let loose = hash_directory_eol_insensitive(tmp.path()).unwrap();
+        let strict = hash_directory(tmp.path()).unwrap();
+
+        for dir in [
+            "node_modules/pkg",
+            "scripts/node_modules/pkg",
+            ".venv/lib",
+            "venv/lib",
+        ] {
+            fs::create_dir_all(tmp.path().join(dir)).unwrap();
+            fs::write(tmp.path().join(dir).join("index.js"), "x").unwrap();
+        }
+
+        assert_eq!(hash_directory_eol_insensitive(tmp.path()).unwrap(), loose);
+        assert_ne!(hash_directory(tmp.path()).unwrap(), strict);
+    }
+
+    /// The skip applies below the root: a skill whose own directory happens to
+    /// be named `venv` still hashes its content.
+    #[test]
+    fn a_skill_directory_named_like_a_dependency_dir_is_still_hashed() {
+        let tmp = tempdir().unwrap();
+        let skill = tmp.path().join("venv");
+        fs::create_dir_all(&skill).unwrap();
+        fs::write(skill.join("SKILL.md"), "# hello").unwrap();
+
+        assert!(hash_directory_eol_insensitive(&skill).is_ok());
+    }
 
     /// Project-workspace skills may now be symlinks to the central library
     /// (#225). Sync-status classification hashes the project path directly,

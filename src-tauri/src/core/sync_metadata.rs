@@ -62,6 +62,22 @@ pub struct ScenarioSkillMetaFile {
     pub tools: BTreeMap<String, bool>,
 }
 
+/// Reindex refused: the metadata lists no skills while the central repo has
+/// skill directories (applying it would empty the library). Typed so startup
+/// can tell it apart from other failures.
+#[derive(Debug)]
+pub struct EmptySkillMetadata;
+
+impl std::fmt::Display for EmptySkillMetadata {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(
+            "sync metadata contains no skills, but the central repository contains skill directories",
+        )
+    }
+}
+
+impl std::error::Error for EmptySkillMetadata {}
+
 pub fn metadata_dir() -> PathBuf {
     central_repo::skills_dir().join(".skills-manager")
 }
@@ -122,9 +138,7 @@ pub(crate) fn reindex_from_metadata_unlocked(store: &SkillStore) -> Result<()> {
 
     let skills = read_skill_files()?;
     if skills.is_empty() && central_repo_has_valid_skill_dirs()? {
-        bail!(
-            "sync metadata contains no skills, but the central repository contains skill directories"
-        );
+        return Err(EmptySkillMetadata.into());
     }
     ensure_unique_path_keys(&skills)?;
 

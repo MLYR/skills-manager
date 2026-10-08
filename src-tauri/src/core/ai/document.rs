@@ -772,6 +772,9 @@ mod tests {
 
     #[test]
     fn managed_skill_reads_first_level_candidate_in_priority_order() {
+        // skills_dir 覆盖是进程级静态状态：本测试改了它就必须与其它读取它的测试串行，
+        // 否则并发的 app_state 元数据重建测试会读到本测试的临时目录并报 ENOENT。
+        let _central_override_guard = crate::core::central_repo::test_base_dir_lock();
         let _guard = super::CENTRAL_ROOT_LOCK.lock().unwrap();
         let directory = tempdir().unwrap();
         let store = SkillStore::new(&directory.path().join("managed.db")).unwrap();
@@ -825,6 +828,9 @@ mod tests {
 
     #[test]
     fn oversized_document_is_aborted_not_loaded() {
+        // skills_dir 覆盖是进程级静态状态：本测试改了它就必须与其它读取它的测试串行，
+        // 否则并发的 app_state 元数据重建测试会读到本测试的临时目录并报 ENOENT。
+        let _central_override_guard = crate::core::central_repo::test_base_dir_lock();
         let _guard = super::CENTRAL_ROOT_LOCK.lock().unwrap();
         let directory = tempdir().unwrap();
         let store = SkillStore::new(&directory.path().join("oversize.db")).unwrap();
@@ -881,6 +887,9 @@ mod tests {
 
     #[test]
     fn symlink_document_candidate_is_skipped() {
+        // skills_dir 覆盖是进程级静态状态：本测试改了它就必须与其它读取它的测试串行，
+        // 否则并发的 app_state 元数据重建测试会读到本测试的临时目录并报 ENOENT。
+        let _central_override_guard = crate::core::central_repo::test_base_dir_lock();
         let _guard = super::CENTRAL_ROOT_LOCK.lock().unwrap();
         #[cfg(unix)]
         {

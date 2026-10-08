@@ -780,8 +780,10 @@ fn delete_managed_skills_by_ids_with_runtime(
 
             let targets = store.get_targets_for_skill(skill_id)?;
             for target in &targets {
-                let target_path = PathBuf::from(&target.target_path);
-                sync_engine::remove_target(&target_path).ok();
+                sync_engine::remove_recorded_target_or_warn(
+                    &PathBuf::from(&target.target_path),
+                    &target.mode,
+                );
             }
 
             let central = PathBuf::from(&skill.central_path);
@@ -3377,13 +3379,16 @@ mod tests {
         let target_dir = repo._tmp.path().join("target-skill-one");
         fs::create_dir_all(&target_dir).unwrap();
         fs::write(target_dir.join("SKILL.md"), "# target").unwrap();
+        // A real directory pairs with a copy record; a symlink record over a
+        // real directory is the #435 data-loss shape and now preserves it
+        // (see deleting_a_skill_preserves_user_content_...).
         repo.store
             .insert_target(&SkillTargetRecord {
                 id: "target-1".to_string(),
                 skill_id: "skill-1".to_string(),
                 tool: "cursor".to_string(),
                 target_path: target_dir.to_string_lossy().to_string(),
-                mode: "symlink".to_string(),
+                mode: "copy".to_string(),
                 status: "ok".to_string(),
                 synced_at: Some(1),
                 last_error: None,
@@ -3953,6 +3958,22 @@ mod tests {
         assert_eq!(dto.update_status, "up_to_date");
     }
 
+    /// #502: `npm install` in a local skill's source is not an update.
+    #[test]
+    fn a_local_source_with_only_installed_dependencies_is_up_to_date() {
+        let repo = test_repo();
+        let body = "---\nname: skill-1\n---\nbody\n";
+        insert_local_skill(&repo, "skill-1", body, body);
+        let deps = repo._tmp.path().join("skill-1-source/node_modules/pkg");
+        fs::create_dir_all(&deps).unwrap();
+        fs::write(deps.join("index.js"), "module.exports = 1;\n").unwrap();
+
+        let dto =
+            check_skill_update_internal_with_remote(&repo.store, "skill-1", true, None).unwrap();
+
+        assert_eq!(dto.update_status, "up_to_date");
+    }
+
     /// A vanished library copy still has an update to offer. This is a
     /// regression guard on the end-to-end path, not proof of the empty-tree
     /// guard itself — a non-empty source cannot collide with an empty library,
@@ -4299,5 +4320,46 @@ mod tests {
 
         let err = resolve_skill_dir(tmp.path(), Some("gone"), Some("nope-not-here")).unwrap_err();
         assert!(err.message.contains("not found"), "{}", err.message);
+    }
+
+    /// #435: removing a library skill used to delete whatever sat at each
+    /// recorded target. A real directory that replaced our symlink is the
+    /// user's local fork — it must survive the removal.
+    #[test]
+    fn deleting_a_skill_preserves_user_content_that_replaced_a_recorded_link() {
+        let repo = test_repo();
+        let dir = write_skill_dir("my-skill");
+        repo.store
+            .insert_skill(&sample_skill("s1", "my-skill", &dir))
+            .unwrap();
+
+        let agent_tmp = tempdir().unwrap();
+        let target = agent_tmp.path().join("my-skill");
+        fs::create_dir_all(&target).unwrap();
+        fs::write(target.join("mine.txt"), "DO_NOT_OVERWRITE").unwrap();
+        repo.store
+            .insert_target(&SkillTargetRecord {
+                id: "t1".to_string(),
+                skill_id: "s1".to_string(),
+                tool: "test_agent".to_string(),
+                target_path: target.to_string_lossy().to_string(),
+                mode: "symlink".to_string(),
+                status: "ok".to_string(),
+                synced_at: Some(1),
+                last_error: None,
+                source_hash: None,
+            })
+            .unwrap();
+
+        let result = delete_managed_skills_by_ids(&repo.store, &["s1".to_string()]).unwrap();
+
+        assert_eq!(result.deleted, 1);
+        assert!(result.failed.is_empty());
+        assert_eq!(
+            fs::read_to_string(target.join("mine.txt")).unwrap(),
+            "DO_NOT_OVERWRITE",
+            "the user's local fork must survive the skill removal"
+        );
+        assert!(repo.store.get_targets_for_skill("s1").unwrap().is_empty());
     }
 }
