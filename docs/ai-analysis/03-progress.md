@@ -575,3 +575,18 @@
 - `npm run tauri:build` 产出 `skills-manager.app` 与 `skills-manager_1.40.0_aarch64.dmg`（19.7MB）；dmg 可正常挂载，内部 app 版本 1.40.0，二进制 sha256 与 bundle 内一致。
 - 两条与本功能无关的既有情况，仅登记不处理：本机 rustfmt 1.97 下全仓有 264 处历史格式差异，合并前的 main 同样存在（`git_backup.rs` 14 处、`skills-manager-cli.rs` 3 处、`agent_workspace.rs` 3 处），因此 `rustfmt --check` 在本机不能作为验收门；`core/ai/repository.rs:1738` 的 `unused variable: repository` 警告在合并前已存在。
 - 构建环境说明：官方 crates.io 源在当前网络下只剩约 20KB/s，本次构建临时把 cargo 源替换为中科大镜像（`~/.cargo/config.toml`，稀疏索引 `sparse+https://mirrors.ustc.edu.cn/crates.io-index/`）。移除该文件即回到官方源，但下次构建需要重新下载依赖。
+
+## 29. 同步上游 v1.40.3：单处冲突与测试竞争修复（2026-09-20，已完成）
+
+用户要求再次检查上游并合并打包。上游新增 26 个提交（v1.40.0 → v1.40.3），不含任何迁移改动，因此 AI 表迁移步骤与 `LATEST_VERSION` 不受影响。
+
+冲突只有一处：`src/views/WorkspaceView.tsx`。上游把本文件里的 `compactHomePath` 抽到 `src/utils.ts` 并改成跨平台实现（统一 Windows 分隔符，对应上游 #495），本分支仍在文件内保留旧定义。处理：采用上游的 `src/utils.ts` 版本，删除文件内的本地重复定义，AI 辅助函数原样保留。
+
+合并后发现一个**只在全量测试中暴露的竞争**，已修复：上游新增的 `core::app_state::tests::empty_metadata_is_rebuilt_from_an_intact_database` 连续 3 次全量运行都失败（`src/core/app_state.rs:446` 读 `metadata_dir()/skills` 报 ENOENT），单独运行或只跑 `core::app_state::` 却通过。根因是 5 个 AI 测试（`core::ai::service` 2 个、`core::ai::document` 3 个）会修改进程级 `skills_dir` 覆盖，而它们只持有自己的 `CENTRAL_ROOT_LOCK`，没有持 `central_repo::test_base_dir_lock()`——后者是 `central_repo.rs` 明确要求修改该全局前必须持有的锁；并发的 app_state 测试因此读到 AI 测试的临时目录。处理：在这 5 个测试开头加 `test_base_dir_lock()` 守卫，锁顺序固定为 base-dir 先、CENTRAL_ROOT 后（无反向持有，无死锁风险），不改变任何被测逻辑。
+
+验证：
+
+- 修复前必挂的组合 `cargo test --lib -- core::app_state:: core::ai::` 现在 78 passed；全量 `cargo test` 641 passed / 0 failed / 7 ignored。
+- `npx tsc -b --pretty false`、`npx eslint .` 退出码 0；三语 `settings.ai`（92 键）与 `ai`（96 键）命名空间无丢失。
+- AI 独有文件与合并前逐字节一致；被改动的只有上述 5 个测试的加锁行。
+- `npm run tauri:build` 产出 `skills-manager.app` 与 `skills-manager_1.40.3_aarch64.dmg`，dmg 可挂载、内部 app 版本 1.40.3。
